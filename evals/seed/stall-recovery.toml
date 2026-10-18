@@ -1,0 +1,5 @@
+task = "The first model repeats itself; the stall detector must move to the next model. Finish."
+chains = { lead = ["m1", "m2"] }
+max_turns = 10
+fake_script = "stall-recovery.json"
+expect_events = ["stall"]

@@ -1,0 +1,47 @@
+{
+ "tags": [
+  "gpt-oss:120b"
+ ],
+ "models": {
+  "gpt-oss:120b": [
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "write_file",
+       "arguments": {
+        "path": "hello.py",
+        "content": "print(42)\n"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "python hello.py"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "hello.py prints 42"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

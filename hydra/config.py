@@ -187,6 +187,14 @@ redact            = true
 untrusted_paths   = ["~/storage/downloads/**"]
 redact_env        = ["OLLAMA_API_KEY"]
 
+# MCP tools (optional, §19.5): stdio JSON-RPC servers. Their tools appear as
+# mcp__<server>__<tool>, visible to roles with mcp = true (default: lead,
+# coder, researcher). Schemas are cached in ~/.hydra/mcp_cache/.
+# [mcp.servers.example]
+# command = ["npx", "-y", "some-mcp-server"]
+# env     = {}
+# eager   = false
+
 # Role chains/think levels are also configurable here, e.g.:
 # [roles.lead]
 # chain = ["gpt-oss:120b", "nemotron-3-ultra", "gemma4:31b"]

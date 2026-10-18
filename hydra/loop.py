@@ -94,6 +94,11 @@ def run_agent(agent, rt) -> dict:
                         continue
                     break
                 agent.stall_check(rt, calls, results)
+                try:
+                    from . import snapshots
+                    snapshots.turn_snapshot(rt, agent)  # §19.9, root agent only
+                except Exception:
+                    pass
                 if rt.journal:
                     rt.journal.turn_boundary()
             except CallCancelled as exc:
@@ -135,6 +140,10 @@ def run_agent(agent, rt) -> dict:
     if agent.status == "running":
         st = (agent.report or {}).get("status")
         agent.status = "done" if st in ("done", "partial") else "failed"
+    if int(getattr(agent, "depth", 0) or 0) > 0 and not agent.report \
+            and getattr(agent, "turns", 0) > 0 and agent.status != "killed":
+        # sub-agent report as a structured tool-less call (§19.10)
+        agent.synthesize_report(rt)
     report = agent.report_out()
     if rt.journal:
         rt.journal.event("report", agent.id, report=report)

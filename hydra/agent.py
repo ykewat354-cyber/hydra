@@ -16,6 +16,48 @@ from . import config as C
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
+# §19.10 structured outputs: tool-less calls only.
+DIGEST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "goal": {"type": "string"},
+        "status": {"type": "string"},
+        "decisions": {"type": "array", "items": {"type": "string"}},
+        "files": {"type": "array", "items": {"type": "string"}},
+        "commands": {"type": "array", "items": {"type": "string"}},
+        "findings": {"type": "array", "items": {"type": "string"}},
+        "blockers": {"type": "array", "items": {"type": "string"}},
+        "next": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["goal", "status", "next"],
+}
+REPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "string", "enum": ["done", "partial", "failed"]},
+        "summary": {"type": "string"},
+        "files_changed": {"type": "array", "items": {"type": "string"}},
+        "findings": {"type": "array", "items": {"type": "string"}},
+        "open_issues": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["status", "summary"],
+}
+
+
+def _render_digest(obj: dict) -> str:
+    lines = [f"GOAL: {obj.get('goal') or '?'}",
+             f"STATUS: {obj.get('status') or '?'}"]
+    for key, label in (("decisions", "DECISIONS"), ("files", "FILES"),
+                       ("commands", "COMMANDS"), ("findings", "FINDINGS"),
+                       ("blockers", "BLOCKERS"), ("next", "NEXT")):
+        vals = obj.get(key) or []
+        if isinstance(vals, str):
+            vals = [vals]
+        if vals:
+            lines.append(label + ":")
+            lines += [f"- {v}" for v in vals]
+    return "\n".join(lines)
+
 
 def parse_json_blob(text: str):
     """Tolerant JSON extraction: raw, fenced, or first balanced {...}."""
@@ -371,14 +413,40 @@ class Agent:
         text = ""
         try:
             reply = rt.router.chat([{"role": "user", "content": prompt}],
-                                   role="summarizer", think="off")
+                                   role="summarizer", think="off",
+                                   format=DIGEST_SCHEMA)
             text = (reply.content or "").strip()
+            obj = parse_json_blob(text)
+            if isinstance(obj, dict) and (obj.get("goal") or obj.get("status")):
+                text = _render_digest(obj)
         except Exception:
             text = ""
         if not text:
             text = self._mechanical_digest(old_msgs)
         return ("# State digest (compacted; older turns removed)\n"
                 + text[:3150])
+
+    def synthesize_report(self, rt) -> bool:
+        """Sub-agent report via a tool-less summarizer call + JSON schema (§19.10)."""
+        try:
+            tail = self._digest_input(self.messages[-12:])[:7000]
+            prompt = ("A sub-agent ended without calling finish. Write its report "
+                      "from the transcript tail below. Return the JSON object only.\n\n"
+                      + tail)
+            reply = rt.router.chat([{"role": "user", "content": prompt}],
+                                   role="summarizer", think="off",
+                                   format=REPORT_SCHEMA)
+            obj = parse_json_blob(reply.content or "")
+            if isinstance(obj, dict) and str(obj.get("summary") or "").strip():
+                self.set_report(str(obj.get("status") or "partial"),
+                                str(obj.get("summary")),
+                                files_changed=obj.get("files_changed"),
+                                findings=obj.get("findings"),
+                                open_issues=obj.get("open_issues"))
+                return True
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _digest_input(msgs: list) -> str:

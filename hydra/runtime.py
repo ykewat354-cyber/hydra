@@ -36,6 +36,7 @@ class Runtime:
             C.get(cfg, "api.idle_timeout", 90) or 90)
         self.sigint = threading.Event()   # first Ctrl-C: cancel, keep the run alive
         self.client.cancel_event = self.sigint
+        self.client.redact = self.redact
         self._child_env: dict = {}
         self.gate = LLMGate(C.max_inflight(cfg))
         self.registry = ModelRegistry(cfg)
@@ -273,6 +274,11 @@ class Runtime:
     def close(self) -> None:
         if self.journal:
             self.journal.close()
+        try:
+            if getattr(self.tools, "mcp", None) is not None:
+                self.tools.mcp.close()
+        except Exception:
+            pass
         for pool in (self.executor.pool, self.executor.agent_pool):
             try:
                 pool.shutdown(wait=False)

@@ -44,6 +44,10 @@ commands:
   models probe|ls|pin   discover models your key can use
   daemon [--once]       run *.md task files dropped in ~/.hydra/queue/
   schedule add|ls|rm    periodic jobs fired by the daemon
+  map [PATH] [BUDGET]   repo map: tree + top-level symbols (cached)
+  undo [RUN] [--to N]   restore the workdir from a shadow snapshot
+  eval [SUITE]          run scripted eval suites on the fake server
+  init                  the lead explores the repo and writes HYDRA.md
   doctor                environment checks
   kill RUN              stop a run
 
@@ -189,9 +193,12 @@ def main(argv=None) -> int:
         return cmd_schedule(cfg, rest[1:])
     if cmd == "init":
         return cmd_init(cfg, o)
-    if cmd in ("undo", "map", "eval"):
-        print(f"hydra: '{cmd}' arrives with a later build phase.")
-        return 2
+    if cmd == "map":
+        return cmd_map(cfg, rest[1:])
+    if cmd == "undo":
+        return cmd_undo(cfg, rest[1:], o)
+    if cmd == "eval":
+        return cmd_eval(cfg, rest[1:], o)
 
     task = " ".join(rest)
     if not task.strip():
@@ -216,7 +223,9 @@ def cmd_run(cfg, task, o) -> int:
     if o.detach:
         return _spawn_detached(cfg, task, o)
     from .runtime import Runtime
+    from . import mentions
     rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
+    task = mentions.expand(cfg, task, os.getcwd(), rt.client)
     rt.wake_lock()
     restore = _install_signals(rt)
     code, report = 1, {}
@@ -312,6 +321,96 @@ def cmd_init(cfg, o) -> int:
     """`hydra init` (§19.1): the lead explores the repo and writes HYDRA.md."""
     print("exploring this repo and writing HYDRA.md…")
     return cmd_run(cfg, INIT_TASK, o)
+
+
+def cmd_map(cfg, args) -> int:
+    """`hydra map` (§19.4): the repo map, printed."""
+    from . import repo_map
+    path = "."
+    budget = 1500
+    for a in args:
+        if str(a).isdigit():
+            budget = int(a)
+        else:
+            path = str(a)
+    text, _st = repo_map.build(path, budget)
+    print(text)
+    return 0
+
+
+def cmd_undo(cfg, args, o) -> int:
+    """`hydra undo` (§19.9): restore the workdir from a shadow snapshot."""
+    from . import snapshots
+    run_id, to, dry, do_prune = None, None, False, False
+    i = 0
+    while i < len(args):
+        a = str(args[i])
+        if a == "--dry-run":
+            dry = True
+        elif a == "--prune":
+            do_prune = True
+        elif a == "--to" and i + 1 < len(args):
+            i += 1
+            try:
+                to = int(args[i])
+            except ValueError:
+                print("hydra undo: --to needs a turn number")
+                return 2
+        elif a.startswith("--to="):
+            try:
+                to = int(a.split("=", 1)[1])
+            except ValueError:
+                print("hydra undo: --to needs a turn number")
+                return 2
+        elif a.startswith("-"):
+            print(f"hydra undo: unknown flag {a!r}")
+            return 2
+        else:
+            run_id = a
+        i += 1
+    root = os.getcwd()
+    if do_prune:
+        n = snapshots.prune(root)
+        print(f"pruned {n} snapshot ref(s) older than 14 days")
+        return 0
+    info = snapshots.undo(root, run_id=run_id, to=to, dry_run=dry)
+    if not info.get("ok"):
+        print(f"hydra undo: {info.get('note')}")
+        return 2
+    verb = "would restore" if dry else "restored"
+    print(f"run {info['run']} turn {info['turn']} ({str(info['sha'])[:12]}): "
+          f"{verb} the working tree")
+    changed = []
+    if dry:
+        try:
+            p = snapshots._git(root, "diff", "--name-only", info["sha"], "--", ".")
+            if p.returncode == 0:
+                changed = [ln for ln in p.stdout.splitlines() if ln.strip()]
+        except Exception:
+            changed = []
+        for rel in changed[:40]:
+            print(f"  change  {rel}")
+    else:
+        for rel in info["restore"][:15]:
+            print(f"  restore {rel}")
+    for rel in info["remove"][:40]:
+        print(("  remove  " if not dry else "  delete  ") + rel)
+    extra = len(changed) + len(info["remove"]) - min(len(changed), 40) - min(len(info["remove"]), 40)
+    if extra > 0:
+        print(f"  … {extra} more")
+    if info.get("fail"):
+        print(f"hydra undo: restore reported: {info['fail']}")
+        return 1
+    if not dry:
+        print("done — your branch, HEAD and index were not touched")
+        print("(snapshots stay until `hydra undo --prune` removes refs older than 14 days)")
+    return 0
+
+
+def cmd_eval(cfg, args, o) -> int:
+    """`hydra eval` (§19.11): scripted fake-server suites, zero credits."""
+    from . import evals
+    return evals.cli(cfg, args)
 
 
 def _spawn_detached(cfg, task, o) -> int:
@@ -428,6 +527,8 @@ def cmd_repl(cfg, o) -> int:
             return 0
         if not task:
             return 0
+        from . import mentions
+        task = mentions.expand(cfg, task, rt.cwd, rt.client)
         box = {}
 
         def work():
@@ -470,7 +571,8 @@ def cmd_repl(cfg, o) -> int:
                     if not _repl_cmd(rt, line, pending):
                         break
                 else:
-                    pending.append(line)
+                    from . import mentions
+                    pending.append(mentions.expand(rt.cfg, line, rt.cwd, rt.client))
                     if rt.agents.get("a0") is None:
                         print("→ queued (the run is still starting)")
         except KeyboardInterrupt:
@@ -549,12 +651,31 @@ def _repl_cmd(rt, line, pending=None) -> bool:
             print("compacted" if ok else "nothing to compact yet")
     elif cmd == "/plan":
         lead = rt.agents.get("a0")
-        msg = ("PLAN FIRST: before any further tool action, emit your plan as a "
-               "todo list (todo tool), then execute it step by step.")
         if lead is not None:
-            lead.nudge(msg)
-            print("plan requested from the lead")
+            def _plan_async(lead=lead):
+                try:
+                    from . import planner
+                    dag, err = planner.make_dag(rt, lead.task or "the current task")
+                except Exception as exc:
+                    dag, err = None, f"{type(exc).__name__}: {exc}"
+                if dag is not None:
+                    text = planner.render(dag)
+                    print("\n" + text, flush=True)
+                    lead.nudge("Here is the plan the user requested. Follow this "
+                               "DAG (todo tool to track it) and execute step by "
+                               "step:\n" + text)
+                    print("plan sent to the lead", flush=True)
+                else:
+                    lead.nudge("PLAN FIRST: before any further tool action, emit "
+                               "your plan as a todo list (todo tool), then execute "
+                               "it step by step.")
+                    print(f"plan requested from the lead ({err})", flush=True)
+
+            threading.Thread(target=_plan_async, daemon=True).start()
+            print("planning in the background…")
         else:
+            msg = ("PLAN FIRST: before any further tool action, emit your plan as a "
+                   "todo list (todo tool), then execute it step by step.")
             if pending is not None:
                 pending.append(msg)
             print("plan requested (queued until the run starts)")
@@ -723,7 +844,6 @@ def cmd_daemon(cfg, args) -> int:
 
 
 # ------------------------------------------------------------------ schedule
-
 def cmd_schedule(cfg, args) -> int:
     from . import schedule as S
     sub = (args[0] if args else "ls").lower()

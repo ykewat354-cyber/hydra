@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import select
 import shutil
 import signal
 import subprocess
@@ -52,40 +53,98 @@ def run_shell(rt, cwd, cmd: str, timeout: float, stdin_text=None) -> str:
             start_new_session=True)
     except Exception as exc:
         return f"ERROR: could not start shell: {exc}"
+
+    if stdin_text is not None:
+        import threading
+
+        def _feed():
+            try:
+                proc.stdin.write(stdin_text.encode())
+                proc.stdin.close()
+            except Exception:
+                pass
+
+        threading.Thread(target=_feed, daemon=True).start()
+
     end = time.time() + float(timeout)
-    input_bytes = stdin_text.encode() if stdin_text is not None else None
+    fd = proc.stdout.fileno()
+    chunks: list = []
     cancelled = False
-    out = b""
+    timed_out = False
+    last_emit = 0.0
+    emitted = 0
     while True:
+        if rt is not None and getattr(rt, "sigint", None) is not None \
+                and rt.sigint.is_set():
+            cancelled = True
+            _kill_group(proc)
         slice_s = max(0.05, min(0.4, end - time.time()))
         try:
-            out, _ = proc.communicate(input=input_bytes, timeout=slice_s)
-            input_bytes = None
-            break
-        except subprocess.TimeoutExpired:
-            input_bytes = None
-            if rt is not None and getattr(rt, "sigint", None) is not None \
-                    and rt.sigint.is_set():
-                cancelled = True
-                _kill_group(proc)
-            elif time.time() >= end:
-                _kill_group(proc)
-                try:
-                    out, _ = proc.communicate(timeout=5)
-                except Exception:
-                    out = b""
-                text = out.decode("utf-8", "replace")
-                return text + f"\n[timeout after {timeout}s — process group killed]"
-            else:
-                continue
+            ready, _, _ = select.select([fd], [], [], slice_s)
+        except Exception:
+            ready = []
+        if ready:
             try:
-                out, _ = proc.communicate(timeout=5)
-            except Exception:
-                out = b""
+                data = os.read(fd, 65536)
+            except OSError:
+                data = b""
+            if not data:
+                break  # EOF
+            chunks.append(data)
+        else:
+            if proc.poll() is not None:
+                # process is gone: one last look for bytes, then stop
+                try:
+                    ready2, _, _ = select.select([fd], [], [], 0.2)
+                except Exception:
+                    ready2 = []
+                if not ready2:
+                    break
+                continue
+        if cancelled:
             break
-    text = out.decode("utf-8", "replace")
+        if time.time() >= end and proc.poll() is None:
+            timed_out = True
+            _kill_group(proc)
+            break
+        # §19.10: the last lines of long-running commands stream to the TUI
+        now = time.time()
+        if chunks and proc.poll() is None and now - last_emit >= 0.8:
+            last_emit = now
+            try:
+                text = b"".join(chunks).decode("utf-8", "replace")
+                lines = text.splitlines()
+                complete = len(lines) - (0 if text.endswith("\n") else 1)
+                new = lines[emitted:max(emitted, complete)]
+                emitted = max(emitted, complete)
+                ui = getattr(rt, "ui", None)
+                if ui is not None and not getattr(ui, "quiet", False) \
+                        and not getattr(ui, "json_out", False):
+                    for ln in new[-20:]:
+                        if ln.strip():
+                            ui.info("   | " + ln[:200])
+            except Exception:
+                pass
+
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        _kill_group(proc)
+    try:
+        rest = os.read(fd, 65536)
+        if rest:
+            chunks.append(rest)
+    except Exception:
+        pass
+    try:
+        proc.stdout.close()
+    except Exception:
+        pass
+    text = b"".join(chunks).decode("utf-8", "replace")
     if cancelled:
         return text + "\n[interrupted by Ctrl-C — process group killed]"
+    if timed_out:
+        return text + f"\n[timeout after {timeout}s — process group killed]"
     if proc.returncode not in (0, None):
         text += f"\n[exit {proc.returncode}]"
     return text

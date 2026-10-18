@@ -1,0 +1,29 @@
+{
+ "tags": [
+  "gpt-oss:120b"
+ ],
+ "models": {
+  "gpt-oss:120b": [
+   {
+    "status": 429,
+    "retry_after": 1,
+    "body": {
+     "error": "rate limited"
+    }
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "429 honored"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

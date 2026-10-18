@@ -1,0 +1,6 @@
+task = "Rename old_name to new_name in every Python file here, run b.py, then finish."
+setup = '''printf '%s\n' 'old_name = 1' 'print(old_name)' > a.py
+printf '%s\n' 'from a import old_name' 'print(old_name + 1)' > b.py'''
+check = "! grep -q old_name a.py b.py && python b.py | grep -qx 2"
+max_turns = 8
+fake_script = "multi-file-rename.json"

@@ -81,25 +81,94 @@ def _tool_edit_file(args, ctx) -> str:
     path = _resolve(ctx, args.get("path"))
     if not path.is_file():
         return f"ERROR: not a file: {path}"
+    count = max(1, int(args.get("count") or 1))
+    text = path.read_text(encoding="utf-8", errors="replace")
+    before = text.count("\n")
+
+    edits = args.get("edits")
+    if edits is not None:
+        if not isinstance(edits, list) or not edits:
+            return "ERROR: edits must be a non-empty list of {old,new}"
+        for i, e in enumerate(edits, 1):
+            if not isinstance(e, dict):
+                return f"ERROR: edit {i} is not an object"
+            old, new = e.get("old"), e.get("new")
+            if old is None or new is None:
+                return f"ERROR: edit {i}: both old and new are required"
+            text, err = _apply_edit(text, str(old), str(new),
+                                    max(1, int(e.get("count") or 1)))
+            if err:
+                return (f"ERROR: edit {i}/{len(edits)} failed: {err}\n"
+                        + _closest_context(path, str(old))
+                        + f"\n(atomic: no changes were written to {path})")
+        path.write_text(text, encoding="utf-8")
+        after = text.count("\n")
+        return (f"edited {path}: {len(edits)} edit(s) applied atomically; "
+                f"lines {before} -> {after}")
+
     old = args.get("old")
     new = args.get("new")
     if old is None or new is None:
         return "ERROR: both old and new are required"
-    old, new = str(old), str(new)
-    count = max(1, int(args.get("count") or 1))
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text, err = _apply_edit(text, str(old), str(new), count)
+    if err:
+        return f"ERROR: {err}\n" + _closest_context(path, str(old))
+    path.write_text(text, encoding="utf-8")
+    after = text.count("\n")
+    return (f"edited {path}: lines {before} -> {after}")
+
+
+def _norm_line(s: str) -> str:
+    return " ".join(s.split())
+
+
+def _ws_window(text: str, old: str):
+    """Find where *old* matches text with whitespace normalized.
+
+    Returns ("ok", start_line, n_lines) | ("multi", count) | None.
+    """
+    old_lines = [_norm_line(l) for l in old.split("\n")]
+    old_lines = [l for l in old_lines if l != ""]
+    if not old_lines:
+        return None
+    lines = text.split("\n")
+    norm = [_norm_line(l) for l in lines]
+    n = len(old_lines)
+    hits = []
+    i = 0
+    while i <= len(norm) - n:
+        if norm[i:i + n] == old_lines:
+            hits.append(i)
+            i += n
+        else:
+            i += 1
+    if not hits:
+        return None
+    if len(hits) > 1:
+        return ("multi", len(hits))
+    return ("ok", hits[0], n)
+
+
+def _apply_edit(text: str, old: str, new: str, count: int = 1):
+    """Return (new_text, err). Exact match first, then whitespace-normalized."""
     occurrences = text.count(old)
     if occurrences == 0:
-        return (f"ERROR: old text not found in {path}.\n"
-                + _closest_context(path, old))
+        hit = _ws_window(text, old)
+        if isinstance(hit, tuple) and hit[0] == "ok":
+            _tag, start, n = hit
+            lines = text.split("\n")
+            lines[start:start + n] = new.split("\n")
+            return "\n".join(lines), None
+        if isinstance(hit, tuple) and hit[0] == "multi":
+            return None, (f"old text matches {hit[1]} places in the file even after "
+                          f"whitespace normalization; add surrounding lines to make "
+                          f"it unique")
+        return None, ("old text not found in the file (also tried whitespace-normalized "
+                      "matching).")
     if count == 1 and occurrences > 1:
-        return (f"ERROR: old text occurs {occurrences} times in {path}; make it unique "
-                f"or pass count={occurrences}.")
-    new_text = text.replace(old, new, count) if count > 1 else text.replace(old, new, 1)
-    before, after = text.count("\n"), new_text.count("\n")
-    path.write_text(new_text, encoding="utf-8")
-    return (f"edited {path}: replaced {min(count, occurrences)} of {occurrences} "
-            f"occurrence(s); lines {before} -> {after}")
+        return None, (f"old text occurs {occurrences} times; make it unique "
+                      f"or pass count={occurrences}.")
+    return text.replace(old, new, count) if count > 1 else text.replace(old, new, 1), None
 
 
 def _tool_apply_patch(args, ctx) -> str:
@@ -240,12 +309,17 @@ def register(reg) -> None:
          "required": ["path", "content"]},
         _tool_write_file))
     reg.register(Tool(
-        "edit_file", "Exact-match replace in a file. Errors if 'old' is missing or "
-                     "not unique (pass count>1 to replace multiple).",
+        "edit_file", "Replace text in a file. Exact match first; if it fails, a "
+                     "whitespace-normalized match is tried (must still be unique). "
+                     "Pass edits=[{old,new},…] to apply several changes atomically, "
+                     "or old/new for one (count>1 replaces multiple occurrences).",
         {"type": "object", "properties": {
             "path": {"type": "string"}, "old": {"type": "string"},
-            "new": {"type": "string"}, "count": {"type": "integer"}},
-         "required": ["path", "old", "new"]},
+            "new": {"type": "string"}, "count": {"type": "integer"},
+            "edits": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"old": {"type": "string"}, "new": {"type": "string"}}}}},
+         "required": ["path"]},
         _tool_edit_file))
     reg.register(Tool(
         "apply_patch", "Apply a unified diff (git apply or patch -p1).",

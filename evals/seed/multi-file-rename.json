@@ -1,0 +1,78 @@
+{
+ "tags": [
+  "gpt-oss:120b"
+ ],
+ "models": {
+  "gpt-oss:120b": [
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "edit_file",
+       "arguments": {
+        "path": "a.py",
+        "edits": [
+         {
+          "old": "old_name = 1",
+          "new": "new_name = 1"
+         },
+         {
+          "old": "print(old_name)",
+          "new": "print(new_name)"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "edit_file",
+       "arguments": {
+        "path": "b.py",
+        "edits": [
+         {
+          "old": "from a import old_name",
+          "new": "from a import new_name"
+         },
+         {
+          "old": "print(old_name + 1)",
+          "new": "print(new_name + 1)"
+         }
+        ]
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "python b.py"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "renamed in both files"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

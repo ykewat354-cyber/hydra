@@ -1,0 +1,4 @@
+task = "Write a plugin tool to ~/.hydra/tools, reload tools, call it with text hi, then finish."
+max_turns = 8
+fake_script = "plugin-tool.json"
+expect_tool_result = [{ tool = "echoer", contains = "PLUGIN-OK" }]

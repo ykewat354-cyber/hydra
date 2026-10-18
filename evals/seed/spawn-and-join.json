@@ -1,0 +1,61 @@
+{
+ "tags": [
+  "gpt-oss:120b"
+ ],
+ "models": {
+  "gpt-oss:120b": [
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "spawn_agent",
+       "arguments": {
+        "task": "create out.txt containing the word child",
+        "role": "worker",
+        "wait": true
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "printf '%s\\n' child > out.txt"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "out.txt created"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "worker created out.txt"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -128,6 +128,7 @@ class OllamaCloud:
         self.connect_timeout = float(connect_timeout)
         self.idle_timeout = float(idle_timeout)
         self.cancel_event = None  # set by Runtime: a threading.Event (SIGINT)
+        self.redact = None        # set by Runtime: fn(str)->str (secret hygiene)
 
     # -------------------------------------------------- plumbing
     def _connect(self):
@@ -167,7 +168,7 @@ class OllamaCloud:
 
     # -------------------------------------------------- chat
     def chat(self, model: str, messages: list, tools=None, think=None,
-             options=None, stream: bool = True, on_delta=None) -> Reply:
+             options=None, stream: bool = True, on_delta=None, format=None) -> Reply:
         self._check_cancel()
         payload = {"model": model, "messages": messages, "stream": bool(stream)}
         if tools:
@@ -176,11 +177,17 @@ class OllamaCloud:
             payload["think"] = think
         if options:
             payload["options"] = options
+        if format:
+            # structured outputs (§19.10): tool-less calls only — callers enforce
+            payload["format"] = format
 
         conn = self._connect()
         started = time.time()
         try:
-            conn.request("POST", "/api/chat", json.dumps(payload).encode(), self._headers())
+            body = json.dumps(payload)
+            if self.redact is not None:
+                body = self.redact(body)  # nothing leaves for a model un-redacted
+            conn.request("POST", "/api/chat", body.encode(), self._headers())
             resp = conn.getresponse()
             if resp.status >= 400:
                 raw = resp.read().decode("utf-8", "replace")

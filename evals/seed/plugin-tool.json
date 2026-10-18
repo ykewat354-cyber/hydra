@@ -1,0 +1,57 @@
+{
+ "tags": [
+  "gpt-oss:120b"
+ ],
+ "models": {
+  "gpt-oss:120b": [
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "write_file",
+       "arguments": {
+        "path": "{HOME}/tools/echoer.py",
+        "content": "SPEC = {\n    \"name\": \"echoer\",\n    \"description\": \"Echo text back with a PLUGIN-OK prefix.\",\n    \"parameters\": {\"type\": \"object\", \"properties\": {\"text\": {\"type\": \"string\"}},\n                   \"required\": [\"text\"]},\n}\n\ndef run(args, ctx):\n    return \"PLUGIN-OK \" + str(args.get(\"text\", \"\"))\n"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "reload_tools",
+       "arguments": {}
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "echoer",
+       "arguments": {
+        "text": "hi"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "plugin written and used"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

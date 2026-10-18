@@ -1,0 +1,60 @@
+{
+ "tags": [
+  "gpt-oss:120b"
+ ],
+ "models": {
+  "gpt-oss:120b": [
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "read_file",
+       "arguments": {
+        "path": "calc.py"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "edit_file",
+       "arguments": {
+        "path": "calc.py",
+        "old": "return a - b",
+        "new": "return a + b"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "python test_calc.py"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "add() fixed; test passes"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

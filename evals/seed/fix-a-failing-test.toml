@@ -1,0 +1,13 @@
+task = "The test in this repo fails. Find the bug, fix calc.py, rerun the test, then finish."
+setup = '''cat > calc.py <<'EOF'
+def add(a, b):
+    return a - b
+EOF
+cat > test_calc.py <<'EOF'
+from calc import add
+assert add(2, 3) == 5
+print("OK")
+EOF'''
+check = "python test_calc.py | grep -qx OK"
+max_turns = 8
+fake_script = "fix-a-failing-test.json"

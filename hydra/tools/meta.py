@@ -1,6 +1,8 @@
 """Meta tools: todo, note/recall (blackboard + memory), finish, reload_tools."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from . import Tool
 
 
@@ -175,6 +177,24 @@ def _tool_skill(args, ctx):
     return f"{body}\n\n[skill dir: {s['dir']}]"
 
 
+# ------------------------------------------------------ repo map (§19.4)
+
+def _tool_repo_map(args, ctx):
+    from .. import repo_map
+    raw = str(args.get("path") or ".")
+    p = Path(raw).expanduser() if raw not in ("", ".") else ctx.cwd
+    if not p.is_absolute():
+        p = ctx.cwd / p
+    budget = int(args.get("budget") or 1500)
+    try:
+        text, st = repo_map.build(p, budget)
+    except Exception as exc:
+        return f"ERROR: repo_map failed: {type(exc).__name__}: {exc}"
+    if st.get("updated"):
+        text += f"\n(+{st['updated']} files re-scanned)"
+    return text
+
+
 # ------------------------------------------------------ multi-model (§7.5)
 
 def _tool_ask_models(args, ctx):
@@ -323,3 +343,11 @@ def register(reg) -> None:
         {"type": "object", "properties": {
             "name": {"type": "string", "description": "Skill name (omit to list)."}}},
         _tool_skill))
+    reg.register(Tool(
+        "repo_map",
+        "File tree with top-level symbols per file (Python via ast). Cached and "
+        "incremental. Use once on an unfamiliar repo before reading files.",
+        {"type": "object", "properties": {
+            "path": {"type": "string", "description": "root (default: workdir)"},
+            "budget": {"type": "integer", "description": "token budget (default 1500)"}}},
+        _tool_repo_map))

@@ -1,0 +1,5 @@
+task = "Prove that a 402 on the first model fails over to the backup model and finish."
+chains = { lead = ["paid-model", "backup-model"] }
+max_turns = 4
+fake_script = "failover-402.json"
+expect_events = ["model_response"]

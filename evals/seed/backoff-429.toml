@@ -1,0 +1,4 @@
+task = "Hit a 429 with Retry-After, honor it, then finish."
+max_turns = 4
+fake_script = "backoff-429.json"
+expect_events = ["model_response"]

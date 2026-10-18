@@ -1,0 +1,4 @@
+task = "Create hello.py that prints 42, run it to prove it works, then finish."
+check = 'test "$(python hello.py)" = "42"'
+max_turns = 6
+fake_script = "hello-world.json"

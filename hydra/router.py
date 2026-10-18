@@ -190,9 +190,11 @@ class Router:
     # ------------------------------------------------------------ chat
     def chat(self, messages: list, role: str = "lead", tools=None, think=None,
              agent=None, exclude=(), mode=None, on_delta=None,
-             model: str = None) -> "client.Reply":
+             model: str = None, format=None) -> "client.Reply":
         hint = model or (getattr(agent, "model_override", None)
                          if agent is not None else None)
+        if tools:
+            format = None  # §19.10: never combine format with tools
         chain = self.chain_for(role, exclude, need_tools=bool(tools),
                                model_hint=hint)
         errors = []
@@ -221,7 +223,7 @@ class Router:
                             tools=tools or None,
                             think=self.think_setting(role, model, think),
                             options=self.options_for(role) or None,
-                            stream=True, on_delta=on_delta)
+                            stream=True, on_delta=on_delta, format=format)
                     if self._is_empty(reply):
                         if attempt == 1:
                             messages = list(messages) + [{

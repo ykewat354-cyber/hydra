@@ -1,0 +1,6 @@
+task = "Run echo hi eight times (one per turn), then finish."
+working_ctx = 6000
+chains = { summarizer = ["summarizer-x"] }
+max_turns = 12
+fake_script = "compaction.json"
+expect_events = ["compact"]

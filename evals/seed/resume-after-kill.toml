@@ -1,0 +1,5 @@
+task = "Use bash to create flag.txt containing done; the command may take a couple of seconds. Then finish."
+kill_after = 1.0
+check = "grep -qx done flag.txt"
+max_turns = 6
+fake_script = "resume-after-kill.json"

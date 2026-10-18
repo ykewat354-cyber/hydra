@@ -1,0 +1,49 @@
+{
+ "tags": [
+  "gpt-oss:120b"
+ ],
+ "models": {
+  "gpt-oss:120b": [
+   {
+    "content": "working on it. ",
+    "chunks": 6,
+    "delay_chunks": 0.4,
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "sleep 1; echo done > flag.txt"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "echo done > flag.txt"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "flag.txt written after resume"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

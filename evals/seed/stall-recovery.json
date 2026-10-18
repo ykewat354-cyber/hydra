@@ -1,0 +1,61 @@
+{
+ "tags": [
+  "m1",
+  "m2"
+ ],
+ "models": {
+  "m1": [
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "true"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "true"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "bash",
+       "arguments": {
+        "cmd": "true"
+       }
+      }
+     }
+    ]
+   }
+  ],
+  "m2": [
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "stall recovered"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -13,6 +13,19 @@ from __future__ import annotations
 from . import config as C
 from .agent import load_prompt, parse_json_blob
 
+# §19.10 structured output: tool-less verifier calls use a JSON schema.
+VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "fail"]},
+        "issues": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"what": {"type": "string"}, "fix": {"type": "string"}},
+            "required": ["what"]}},
+    },
+    "required": ["verdict"],
+}
+
 
 def should_verify(cfg: dict, agent) -> bool:
     mode = str(C.get(cfg, "loop.verify", "auto") or "auto").lower()
@@ -62,7 +75,7 @@ def check(rt, agent) -> dict:
     try:
         reply = rt.router.chat([{"role": "user", "content": prompt}],
                                role="reviewer", model=model, agent=agent,
-                               think="low")
+                               think="low", format=VERDICT_SCHEMA)
     except Exception as exc:
         if rt.journal:
             try:

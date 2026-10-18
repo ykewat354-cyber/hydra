@@ -1,0 +1,4 @@
+task = "Spawn a worker sub-agent to create out.txt containing the word child, wait for it, then finish."
+check = "grep -qx child out.txt"
+max_turns = 8
+fake_script = "spawn-and-join.json"

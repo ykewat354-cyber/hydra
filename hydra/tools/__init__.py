@@ -60,7 +60,7 @@ ROLE_TOOLSETS = {
 }
 EXTRA_TOOLS = ("spawn_agent", "spawn_swarm", "agent_status", "agent_wait",
                "agent_send", "agent_kill", "agent_result", "ask_models",
-               "skill", "view_image")
+               "skill", "view_image", "repo_map")
 
 
 def tools_for(spec, role: str):
@@ -82,6 +82,14 @@ class Registry:
         self.plugins: list = []
         self.register_builtins()
         self.load_plugins()
+        self.mcp = None
+        try:
+            from .. import mcp as mcp_mod
+            if C.get(rt.cfg, "mcp.servers", {}) or {}:
+                self.mcp = mcp_mod.McpManager(rt)
+                self.mcp.register_all(self)
+        except Exception:
+            self.mcp = None
 
     # -------------------------------------------------- registration
     def register(self, tool: Tool) -> None:
@@ -89,8 +97,8 @@ class Registry:
             self.tools[tool.name] = tool
 
     def register_builtins(self) -> None:
-        from . import files, meta, shell, termux, web
-        for mod in (shell, files, web, termux, meta):
+        from . import files, meta, shell, termux, vision, web
+        for mod in (shell, files, web, termux, meta, vision):
             mod.register(self)
 
     def get(self, name: str):
@@ -99,9 +107,23 @@ class Registry:
 
     def schemas_for(self, agent) -> list:
         names = tools_for(getattr(agent, "tool_names", "all"), agent.role)
+        role = getattr(agent, "role", "")
+        try:
+            from .. import mcp as mcp_mod
+            mcp_ok = mcp_mod.role_ok(self.rt.cfg, role)
+        except Exception:
+            mcp_ok = True
         with self.lock:
             items = sorted(self.tools.items())
-        return [t.schema() for n, t in items if names is None or n in names]
+        out = []
+        for n, t in items:
+            is_mcp = n.startswith("mcp__")
+            if is_mcp and not mcp_ok:
+                continue
+            if names is not None and n not in names and not is_mcp:
+                continue
+            out.append(t.schema())
+        return out
 
     # -------------------------------------------------- plugins
     def load_plugins(self) -> list:
@@ -114,12 +136,28 @@ class Registry:
                 spec = importlib.util.spec_from_file_location(f"hydra_plugin_{p.stem}", p)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                ts = mod.SPEC
-                fn = mod.run
-                tool = Tool(ts["name"], ts.get("description", ""), ts.get("parameters") or {},
-                            fn, group="plugin")
-                self.register(tool)
-                loaded.append(tool.name)
+                tools = []
+                multi = getattr(mod, "TOOLS", None)
+                if isinstance(multi, (list, tuple)) and callable(getattr(mod, "run", None)):
+                    # multi-tool plugin contract (§19.12): run(name, args, ctx)
+                    for ts in multi:
+                        if not isinstance(ts, dict) or not str(ts.get("name") or "").strip():
+                            continue
+
+                        def _multi(args, ctx, _name=str(ts["name"]), _mod=mod):
+                            return _mod.run(_name, args, ctx)
+
+                        tools.append(Tool(str(ts["name"]), ts.get("description", ""),
+                                          ts.get("parameters") or {}, _multi,
+                                          group="plugin"))
+                else:
+                    ts = mod.SPEC
+                    fn = mod.run
+                    tools.append(Tool(ts["name"], ts.get("description", ""),
+                                      ts.get("parameters") or {}, fn, group="plugin"))
+                for tool in tools:
+                    self.register(tool)
+                    loaded.append(tool.name)
                 with self.lock:
                     if p.name not in self.plugins:
                         self.plugins.append(p.name)
@@ -167,11 +205,28 @@ class Executor:
         for call, content in zip(calls, results):
             name = call["function"]["name"]
             content = self._cap(content, agent, name)
+            if self.rt.redact is not None:
+                content = self.rt.redact(content)  # secrets never reach the model
+            if name.startswith("browser_") and self._untrusted(name):
+                content = self._wrap_untrusted(content, name)
             if self.rt.journal:
                 self.rt.journal.event("tool_result", agent.id, tool=name,
                                       chars=len(content), preview=content[:400])
             out.append({"role": "tool", "tool_name": name, "content": content})
         return out
+
+    def _untrusted(self, name: str) -> bool:
+        from .. import config as C
+        from .. import hygiene
+        if not C.get(self.rt.cfg, "hygiene.untrusted_tagging", True):
+            return False
+        tool = self.rt.tools.get(name)
+        group = str(getattr(tool, "group", "") or "")
+        return group == "browser" or name.startswith("browser_")
+
+    def _wrap_untrusted(self, content: str, name: str) -> str:
+        from .. import hygiene
+        return hygiene.wrap_untrusted(self.rt.cfg, content, f"tool:{name}")
 
     def _invoke(self, name: str, args: dict, agent) -> str:
         tool = self.rt.tools.get(name)

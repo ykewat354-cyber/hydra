@@ -1,0 +1,31 @@
+{
+ "tags": [
+  "paid-model",
+  "backup-model"
+ ],
+ "models": {
+  "paid-model": [
+   {
+    "status": 402,
+    "body": {
+     "error": "payment required"
+    }
+   }
+  ],
+  "backup-model": [
+   {
+    "tool_calls": [
+     {
+      "function": {
+       "name": "finish",
+       "arguments": {
+        "status": "done",
+        "summary": "failover worked"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}
