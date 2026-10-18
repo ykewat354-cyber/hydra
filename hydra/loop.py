@@ -6,6 +6,8 @@ journal a turn boundary. The stall detector, not a counter, stops runaway loops.
 """
 from __future__ import annotations
 
+import time
+
 from . import config as C
 from . import verifier
 from .agent import normalize_call, parse_text_calls
@@ -26,6 +28,10 @@ def run_agent(agent, rt) -> dict:
                 agent.status = "killed"
                 agent.set_report("killed", "Cancelled.")
                 break
+            paused = getattr(rt, "paused", None)
+            if paused is not None and paused.is_set():
+                while paused.is_set() and not agent.cancelled.is_set():
+                    time.sleep(0.2)
             agent.absorb_inbox()
             agent.maybe_compact(rt)
             if max_turns and agent.turns >= max_turns:

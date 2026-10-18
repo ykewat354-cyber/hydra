@@ -13,8 +13,11 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
+import threading
 import time
+from pathlib import Path
 
 from . import __version__
 from . import config as C
@@ -27,6 +30,8 @@ COMMANDS = {"run", "resume", "ls", "tail", "tree", "usage", "doctor", "kill",
 HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud).
 
 usage:  hydra [flags] "task"        start an autonomous run
+        hydra -i                    interactive REPL (steer anytime)
+        hydra --detach "task"       tmux/new-session, survives closing Termux
         hydra <command> [args]
 
 commands:
@@ -36,6 +41,7 @@ commands:
   tree [RUN]            agent tree with status and tokens
   usage [RUN]           token ledger + cost estimate (all runs if omitted)
   models probe|ls|pin   discover models your key can use
+  daemon [--once]       run *.md task files dropped in ~/.hydra/queue/
   doctor                environment checks
   kill RUN              stop a run
 
@@ -45,6 +51,16 @@ flags:
   --name NAME           name this run
   --max-inflight N      LLM gate slots
   --quiet  --json  --wait-reset
+"""
+
+REPL_HELP = """repl commands (all non-blocking, none is an approval):
+  /tree            agent tree + status
+  /kill aN         stop an agent (subtree included)
+  /model [role=]m  pin a model first for a role (default lead)
+  /pause /resume   pause between turns
+  /note text       write to the shared blackboard
+  /quit            leave the REPL (run keeps its state)
+  anything else    goes to the lead's inbox at its next turn
 """
 
 
@@ -126,6 +142,8 @@ def main(argv=None) -> int:
         overrides.append("park.wait_reset=true")
     cfg = C.load_config(overrides=overrides)
 
+    if o.interactive:
+        return cmd_repl(cfg, o)
     if rest and rest[0] == "version":
         print(f"hydra {__version__}")
         return 0
@@ -155,7 +173,9 @@ def main(argv=None) -> int:
         return Models.cli(cfg, rest[1:])
     if cmd == "resume":
         return cmd_resume(cfg, rest[1:], o)
-    if cmd in ("undo", "init", "map", "eval", "daemon", "schedule"):
+    if cmd == "daemon":
+        return cmd_daemon(cfg, rest[1:])
+    if cmd in ("undo", "init", "map", "eval", "schedule"):
         print(f"hydra: '{cmd}' arrives with a later build phase.")
         return 2
 
@@ -169,6 +189,8 @@ def main(argv=None) -> int:
 # ------------------------------------------------------------------ run
 
 def cmd_run(cfg, task, o) -> int:
+    if o.detach:
+        return _spawn_detached(cfg, task, o)
     from .runtime import Runtime
     rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
     rt.wake_lock()
@@ -180,6 +202,60 @@ def cmd_run(cfg, task, o) -> int:
         _footer(rt, report, code)
         rt.close()
     return code
+
+
+def _spawn_detached(cfg, task, o) -> int:
+    """Run the task away from this terminal: tmux when installed (so it
+    survives closing the Termux UI and can be re-attached), else a plain
+    new-session process. Returns immediately."""
+    logdir = C.home() / "detached"
+    logdir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%m%d_%H%M%S")
+    log = logdir / f"{stamp}.log"
+    args = []
+    for s in o.sets:
+        args += ["--set", s]
+    if o.max_inflight:
+        args += ["--max-inflight", str(o.max_inflight)]
+    if o.lead:
+        args += ["--lead", o.lead]
+    if o.name:
+        args += ["--name", o.name]
+    if o.quiet:
+        args += ["--quiet"]
+    if o.wait_reset:
+        args += ["--wait-reset"]
+    cmd = [sys.executable, "-m", "hydra"] + args + [task]
+    env = dict(os.environ)
+    root = str(Path(__file__).resolve().parents[1])
+    have = env.get("PYTHONPATH", "").split(os.pathsep) if env.get("PYTHONPATH") else []
+    if root not in have:
+        env["PYTHONPATH"] = os.pathsep.join([root] + have) if have else root
+    if shutil.which("tmux"):
+        import shlex
+        name = f"hydra_{stamp}"
+        inner = ("termux-wake-lock 2>/dev/null; "
+                 + " ".join(shlex.quote(a) for a in cmd)
+                 + f" 2>&1 | tee -a {shlex.quote(str(log))}; "
+                   "termux-wake-unlock 2>/dev/null")
+        try:
+            subprocess.run(["tmux", "new-session", "-d", "-s", name, inner],
+                           check=True, timeout=30)
+            print(f"detached in tmux session {name}")
+            print(f"  attach:  tmux attach -t {name}")
+            print(f"  log:     {log}")
+            print("  progress: hydra ls · hydra tail")
+            return 0
+        except Exception as exc:
+            print(f"tmux failed ({exc}); using a plain detached process")
+    with open(log, "ab") as fh:
+        subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, cwd=os.getcwd(),
+                         env=env, start_new_session=True)
+    print("detached (new session — survives closing Termux; tmux not installed)")
+    print(f"  log:      {log}")
+    print("  progress: hydra ls · hydra tail")
+    return 0
 
 
 def cmd_resume(cfg, args, o) -> int:
@@ -217,6 +293,225 @@ def _footer(rt, report, code) -> None:
     print(f"\n{status} · {turns} turns · {len(rt.agents)} agents · "
           f"{tot['in'] // 1000}k in / {tot['out'] // 1000}k out · "
           f"est ${tot['est_usd']:.4f} · {mins:02d}:{secs:02d}")
+
+
+# ------------------------------------------------------------------ repl
+
+def cmd_repl(cfg, o) -> int:
+    """Interactive mode: the run works in a background thread while stdin
+    stays free — type to steer, or use /commands. Nothing here gates the
+    agent; it only adds a way to talk to it."""
+    from .runtime import Runtime
+    rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
+    rt.wake_lock()
+    code, report = 1, {}
+    try:
+        if not o.quiet:
+            print("hydra REPL · type the task, then steer anytime · /help for commands")
+        try:
+            task = input("task> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not task:
+            return 0
+        box = {}
+
+        def work():
+            try:
+                box["code"], box["report"] = rt.run(task, name=o.name,
+                                                    lead_model=o.lead)
+            except Exception as exc:  # never let the thread die silently
+                box["code"] = 1
+                box["report"] = {"status": "failed",
+                                 "summary": f"{type(exc).__name__}: {exc}"}
+
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+        import select
+        pending = []  # steers typed before the lead agent exists
+        while th.is_alive():
+            lead = rt.agents.get("a0")
+            if lead is not None and pending:  # deliver as soon as it shows up
+                for m in pending:
+                    lead.send(m)
+                pending.clear()
+                print("→ steered")
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+            except Exception:
+                ready = []
+            if not ready:
+                continue
+            line = sys.stdin.readline()
+            if line == "":  # stdin closed — the run continues to the end
+                break
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("/"):
+                if not _repl_cmd(rt, line):
+                    break
+            else:
+                pending.append(line)
+                if rt.agents.get("a0") is None:
+                    print("→ queued (the run is still starting)")
+        th.join(timeout=15)
+        code = box.get("code", 1)
+        report = box.get("report", {})
+    finally:
+        rt.wake_unlock()
+        _footer(rt, report, code)
+        rt.close()
+    return code
+
+
+def _repl_cmd(rt, line) -> bool:
+    """Handle one /command. Returns False to leave the REPL loop."""
+    parts = line.split(None, 1)
+    cmd = parts[0]
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if cmd in ("/quit", "/exit", "/q"):
+        for a in list(rt.agents.values()):
+            a.cancelled.set()
+        print("stopping… (run state is journaled; hydra resume brings it back)")
+        return False
+    if cmd == "/tree":
+        print(rt.swarm.status_lines())
+    elif cmd == "/kill":
+        if arg:
+            print(rt.swarm.kill(arg))
+        else:
+            print("usage: /kill aN")
+    elif cmd == "/model":
+        role, _, model = arg.partition("=")
+        if not model:
+            model, role = role.strip(), "lead"
+        role = role.strip()
+        if not role or not model:
+            print("usage: /model [role=]model")
+        else:
+            base = list(C.get(rt.cfg, f"roles.{role}.chain") or [])
+            C.set_path(rt.cfg, f"roles.{role}.chain",
+                       [model] + [m for m in base if m != model])
+            print(f"{role} chain: {model} first")
+    elif cmd == "/pause":
+        rt.paused.set()
+        print("paused between turns — /resume to continue")
+    elif cmd == "/resume":
+        rt.paused.clear()
+        print("resumed")
+    elif cmd == "/note":
+        if arg and rt.journal:
+            rt.journal.blackboard_append("repl", arg, persist=False)
+            print("noted")
+        else:
+            print("usage: /note text")
+    elif cmd in ("/help", "/?"):
+        print(REPL_HELP)
+    else:
+        print(f"unknown command {cmd} — /help")
+    return True
+
+
+# ------------------------------------------------------------------ daemon
+
+def _daemon_result(task, src, code, report, rid, usage) -> str:
+    status = (report or {}).get("status") or ("done" if code == 0 else "failed")
+    lines = [f"# {src}", "",
+             f"status: {status}",
+             f"exit_code: {code}",
+             f"run: {rid or '-'}",
+             f"cwd: {os.getcwd()}", "",
+             "## task", task.strip(), "", "## summary",
+             str((report or {}).get("summary") or "(none)").strip()]
+    files = (report or {}).get("files_changed") or []
+    if files:
+        lines += ["", "## files changed", *[f"- {f}" for f in files]]
+    if usage:
+        lines += ["", "## usage",
+                  f"{usage.get('in', 0)} in / {usage.get('out', 0)} out · "
+                  f"est ${usage.get('est_usd', 0.0):.4f}"]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_daemon(cfg, args) -> int:
+    """Watch ~/.hydra/queue/*.md: run each as a task, write the result to
+    queue/done/<name>.result.md, remove the source file. This is the
+    integration seam for any external bridge (SPEC §13)."""
+    from .runtime import Runtime
+    once = "--once" in args
+    qdir = C.home() / "queue"
+    donedir = qdir / "done"
+    qdir.mkdir(parents=True, exist_ok=True)
+    donedir.mkdir(parents=True, exist_ok=True)
+    poll = float(C.get(cfg, "daemon.poll_secs", 5) or 5)
+    stop = threading.Event()
+
+    def on_sig(signum, frame):
+        stop.set()
+
+    old = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            old[sig] = signal.getsignal(sig)
+            signal.signal(sig, on_sig)
+        except Exception:
+            pass
+    print(f"hydra daemon: watching {qdir} (poll {poll}s)")
+    print(f"  drop a *.md task file there; results land in {donedir}/")
+    try:
+        while not stop.is_set():
+            for p in sorted(qdir.glob("*.md")):
+                if stop.is_set():
+                    break
+                if not p.is_file() or p.name.endswith(".result.md"):
+                    continue
+                task = p.read_text(encoding="utf-8", errors="replace").strip()
+                if not task:
+                    continue
+                print(f"[daemon] {p.name}: {_shorten(task, 64)}")
+                code, report, rid, usage = 1, {}, None, {}
+                rt = None
+                try:
+                    rt = Runtime(cfg, quiet=True)
+                    rt.wake_lock()
+                    code, report = rt.run(task, name=p.stem)
+                    rid = rt.run_id
+                    usage = rt.usage_totals()
+                except Exception as exc:
+                    report = {"status": "failed",
+                              "summary": f"{type(exc).__name__}: {exc}"}
+                finally:
+                    if rt is not None:
+                        rt.wake_unlock()
+                        rt.close()
+                out = donedir / f"{p.stem}.result.md"
+                try:
+                    out.write_text(_daemon_result(task, p.name, code, report,
+                                                  rid, usage),
+                                   encoding="utf-8")
+                except Exception as exc:
+                    print(f"[daemon] could not write {out}: {exc}")
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+                print(f"[daemon] {p.name} -> {out.name} "
+                      f"({(report or {}).get('status') or '?'}, exit {code})")
+            if once:
+                break
+            deadline = time.time() + poll
+            while time.time() < deadline and not stop.is_set():
+                time.sleep(0.1)
+    finally:
+        for sig, handler in old.items():
+            try:
+                signal.signal(sig, handler)
+            except Exception:
+                pass
+    print("hydra daemon: stopped")
+    return 0
 
 
 # ------------------------------------------------------------------ inspect
@@ -372,14 +667,15 @@ def cmd_doctor(cfg) -> int:
     from .client import OllamaCloud
     ok = True
 
-    def chk(label, cond, hint=""):
+    def chk(label, cond, hint="", soft=False):
         nonlocal ok
-        mark = "ok  " if cond else "FAIL"
+        mark = "ok  " if cond else ("warn" if soft else "FAIL")
         line = f"[{mark}] {label}"
         if not cond and hint:
             line += f"  -> {hint}"
         print(line)
-        ok = ok and bool(cond)
+        if not soft:
+            ok = ok and bool(cond)
 
     chk("python >= 3.11", sys.version_info >= (3, 11), "pkg install python")
     chk("git", shutil.which("git"), "pkg install git")
@@ -399,6 +695,11 @@ def cmd_doctor(cfg) -> int:
         except Exception as exc:
             chk(f"api reachable ({host})", False, f"{type(exc).__name__}: {exc}")
     chk("termux-api battery probe", _termux_ok(), "pkg install termux-api + Termux:API app")
+    chk("tmux (--detach)", shutil.which("tmux"),
+        "pkg install tmux (falls back to a plain new session)", soft=True)
+    chk("termux-notification (finish/park alerts)",
+        shutil.which("termux-notification"),
+        "pkg install termux-api + Termux:API app", soft=True)
     try:
         probe = C.home() / ".doctor"
         probe.write_text("x", encoding="utf-8")

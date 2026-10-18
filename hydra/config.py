@@ -66,6 +66,7 @@ DEFAULTS: dict = {
         "reprobe_days": 7,
     },
     "termux": {"wake_lock": True, "notify_on_finish": True, "notify_on_park": True},
+    "daemon": {"poll_secs": 5},
     "park": {"wait_reset": False, "poll_interval": 1800},
     "project": {
         "instruction_files": ["HYDRA.md", "AGENTS.md"],

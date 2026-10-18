@@ -68,6 +68,28 @@ def load_system_prompt(kind: str, role: str = None) -> str:
 
 # ---------------------------------------------------------------- env block
 
+_BATTERY = {"at": 0.0, "text": ""}
+
+
+def _battery_line() -> str:
+    """termux-battery-status can take ~1s (Termux:API bridge). Pay it once."""
+    now = time.time()
+    if now - _BATTERY["at"] < 120:
+        return _BATTERY["text"]
+    text = ""
+    try:
+        out = subprocess.run(["termux-battery-status"], capture_output=True,
+                             text=True, timeout=3)
+        if out.returncode == 0:
+            bat = json.loads(out.stdout or "{}")
+            if "percentage" in bat:
+                text = f"battery: {bat['percentage']}%"
+    except Exception:
+        text = ""
+    _BATTERY.update(at=now, text=text)
+    return text
+
+
 def build_env_block(cwd) -> str:
     lines = ["# Environment (fixed for this run)"]
     lines.append(f"date: {time.strftime('%Y-%m-%d %H:%M')}")
@@ -83,15 +105,9 @@ def build_env_block(cwd) -> str:
         lines.append(f"disk_free_mb: {du.free // (1 << 20)}")
     except Exception:
         pass
-    try:
-        out = subprocess.run(["termux-battery-status"], capture_output=True,
-                             text=True, timeout=3)
-        if out.returncode == 0:
-            bat = json.loads(out.stdout or "{}")
-            if "percentage" in bat:
-                lines.append(f"battery: {bat['percentage']}%")
-    except Exception:
-        pass
+    bat = _battery_line()
+    if bat:
+        lines.append(bat)
     return "\n".join(lines)
 
 

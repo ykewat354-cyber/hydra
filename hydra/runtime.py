@@ -53,6 +53,7 @@ class Runtime:
         self._agent_seq = 0
         self._job_seq = 0
         self._lock = threading.RLock()
+        self.paused = threading.Event()  # REPL /pause — checked between turns
 
     # -------------------------------------------------- ids
     def next_agent_id(self) -> str:
@@ -154,6 +155,7 @@ class Runtime:
         self._setup_agent(lead)
         msgs = [r for r in self.journal.read_transcript("a0")
                 if isinstance(r, dict) and r.get("role")]
+        lead.messages = msgs
         # synthesize INTERRUPTED results for a dangling tool-call turn
         if msgs and msgs[-1].get("role") == "assistant" and msgs[-1].get("tool_calls"):
             for tc in msgs[-1]["tool_calls"]:
@@ -161,7 +163,6 @@ class Runtime:
                 lead.append({"role": "tool", "tool_name": name,
                              "content": "INTERRUPTED: harness was killed while this ran; "
                                         "effects unknown. Inspect state before repeating."})
-        lead.messages = msgs
         self.agents = {lead.id: lead}
         self.swarm = Swarm(self)
         self._sync_agent_seq()
