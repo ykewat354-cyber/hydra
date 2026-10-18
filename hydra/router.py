@@ -14,13 +14,7 @@ import time
 from . import config as C
 from .client import (ApiError, AuthError, BadRequest, ContextOverflow, EmptyReply,
                      ModelMissing, PaidModel, RateLimited, ServerError, StreamStalled)
-
-# How a model wants ``think``: gpt-oss class models take level strings, most
-# others take booleans. Probe results in models.json override this.
-DEFAULT_THINK_STYLE = {
-    "gpt-oss:120b": "levels",
-    "gpt-oss:20b": "levels",
-}
+from .models import DEFAULT_THINK_STYLE  # re-exported; probe results override it
 
 
 class AllModelsFailed(Exception):
@@ -47,27 +41,47 @@ class Router:
         self._retries = max(1, int(C.get(cfg, "api.retries", 5) or 5))
 
     # ------------------------------------------------------------ chains
-    def chain_for(self, role: str, exclude=()) -> list:
+    def chain_for(self, role: str, exclude=(), need_tools: bool = False) -> list:
         chain = list(C.get(self.cfg, f"roles.{role}.chain") or
                      C.get(self.cfg, "roles.lead.chain") or [])
         if self.registry is not None:
-            pruned = [m for m in chain if self.registry.status_of(m) in ("ok", "unknown")]
-            if pruned:
-                chain = pruned
+            ok, other = [], []
+            for m in chain:
+                st = self.registry.status_of(m)
+                if st in ("paid", "missing"):
+                    continue
+                if need_tools and st == "ok" and not self.registry.is_tool_capable(m):
+                    continue
+                (ok if st == "ok" else other).append(m)
+            ranked = ok + other
+            if not ranked:
+                return []  # all pruned: chat() decides park vs failure
+            chain = ranked
         if exclude:
             filtered = [m for m in chain if m not in exclude]
             if filtered:
                 chain = filtered
         return chain
 
+    def _raw_chain(self, role: str) -> list:
+        return list(C.get(self.cfg, f"roles.{role}.chain") or
+                    C.get(self.cfg, "roles.lead.chain") or [])
+
+    def _all_paid(self, role: str) -> bool:
+        if self.registry is None:
+            return False
+        statuses = [self.registry.status_of(m) for m in self._raw_chain(role)]
+        return bool(statuses) and all(s == "paid" for s in statuses)
+
     def think_setting(self, role: str, model: str, override=None):
         setting = override if override is not None else C.get(self.cfg, f"roles.{role}.think")
         setting = "off" if setting is None else str(setting)
-        style = "bool"
         if self.registry is not None:
             style = self.registry.think_style(model)
         else:
             style = DEFAULT_THINK_STYLE.get(model, "bool")
+        if style == "none":
+            return None  # this model rejects the param entirely
         if style == "levels":
             return {"off": "low", "low": "low", "medium": "medium", "high": "high"}.get(setting, setting)
         return setting.lower() not in ("off", "false", "0", "")
@@ -167,15 +181,21 @@ class Router:
     # ------------------------------------------------------------ chat
     def chat(self, messages: list, role: str = "lead", tools=None, think=None,
              agent=None, exclude=(), mode=None, on_delta=None) -> "client.Reply":
-        chain = self.chain_for(role, exclude)
+        chain = self.chain_for(role, exclude, need_tools=bool(tools))
         errors = []
         all_paid = True
+        if not chain:
+            raise AllModelsFailed(
+                [RuntimeError("no usable models: all candidates are paid/missing "
+                              "or filtered out")],
+                all_paid=self._all_paid(role))
         priority = getattr(agent, "depth", 0) if agent else 0
         for model in chain:
             if self._breaker_open(model):
                 continue
             attempt = 0
             repair_left = True
+            think_repaired = False
             while True:
                 attempt += 1
                 self._event("model_request", agent, role=role, model=model,
@@ -232,6 +252,15 @@ class Router:
                     break
                 except BadRequest as e:
                     all_paid = False
+                    body = str(e).lower()
+                    if not think_repaired and "think" in body:
+                        think_repaired = True
+                        if self.registry is not None:
+                            try:
+                                self.registry.set_think_style(model, "none")
+                            except Exception:
+                                pass
+                        continue
                     if repair_left:
                         repair_left = False
                         messages = list(messages) + [{

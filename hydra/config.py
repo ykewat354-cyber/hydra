@@ -61,6 +61,10 @@ DEFAULTS: dict = {
         "scribe":     {"chain": ["nemotron-3-super", "gemma4:31b", "gpt-oss:20b"], "think": "low"},
     },
     "journal": {"fsync": "turn", "git_snapshots": False},
+    "models": {
+        "probe_candidates": [],   # empty -> CANDIDATE_MODELS (the pricing table)
+        "reprobe_days": 7,
+    },
     "termux": {"wake_lock": True, "notify_on_finish": True, "notify_on_park": True},
     "park": {"wait_reset": False, "poll_interval": 1800},
     "project": {
@@ -273,6 +277,12 @@ def load_config(overrides=None, project_dir=None) -> dict:
             deep_merge(cfg, tomllib.loads(gpath.read_text(encoding="utf-8")))
         except Exception:
             pass  # a broken global config must never brick the harness
+    ppin = home() / "pinned.toml"
+    if ppin.is_file():
+        try:
+            deep_merge(cfg, tomllib.loads(ppin.read_text(encoding="utf-8")))
+        except Exception:
+            pass  # written by `hydra models pin`; must never brick startup
     pdir = Path(project_dir) if project_dir is not None else Path.cwd()
     ppath = pdir / ".hydra" / "config.toml"
     if ppath.is_file():

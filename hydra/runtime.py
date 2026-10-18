@@ -13,7 +13,9 @@ from . import hygiene
 from . import journal as J
 from .agent import Agent, build_env_block, load_system_prompt
 from .client import AuthError, OllamaCloud
+from .gate import LLMGate
 from .loop import run_agent
+from .models import ModelRegistry
 from .router import AllModelsFailed, Router
 from .tools import Executor, Registry
 
@@ -31,8 +33,8 @@ class Runtime:
             C.get(cfg, "api.host", "https://ollama.com"), key,
             C.get(cfg, "api.connect_timeout", 15) or 15,
             C.get(cfg, "api.idle_timeout", 90) or 90)
-        self.gate = None       # LLM gate plugs in with the models phase
-        self.registry = None   # model registry plugs in with the models phase
+        self.gate = LLMGate(C.max_inflight(cfg))
+        self.registry = ModelRegistry(cfg)
         self.router = Router(cfg, self.client, self.prices, gate=self.gate,
                              registry=self.registry)
 
