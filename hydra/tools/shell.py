@@ -98,7 +98,8 @@ def _background(ctx, cwd: Path, cmd: str) -> str:
             start_new_session=True)
     except Exception as exc:
         return f"ERROR: could not start background job: {exc}"
-    rt.jobs[jid] = {"proc": proc, "log": log, "cmd": cmd, "started": time.time()}
+    rt.jobs[jid] = {"proc": proc, "log": log, "cmd": cmd, "started": time.time(),
+                    "agent": ctx.agent.id}
     return f"started job {jid} (pid {proc.pid}); log: {log}"
 
 

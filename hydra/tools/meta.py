@@ -67,6 +67,94 @@ def _tool_reload_tools(args, ctx):
     return f"tools reloaded; plugins loaded: {', '.join(loaded) if loaded else '(none)'}"
 
 
+# ------------------------------------------------------ sub-agents (§9.2)
+
+def _tool_spawn_agent(args, ctx):
+    swarm = getattr(ctx.rt, "swarm", None)
+    if swarm is None:
+        return "ERROR: swarm is not available in this runtime"
+    task = args.get("task")
+    if not task:
+        return "ERROR: task is required"
+    try:
+        agent = swarm.spawn(ctx.agent, task,
+                            role=str(args.get("role") or "worker"),
+                            model=args.get("model"),
+                            tools=args.get("tools") or "role",
+                            context_files=args.get("context_files"))
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    if args.get("wait", True):
+        swarm.wait([agent.id])
+        return swarm.format_report(agent.id)
+    return (f"spawned {agent.id} ({agent.role}, depth {agent.depth}) in background; "
+            f"use agent_status / agent_wait / agent_result")
+
+
+def _tool_spawn_swarm(args, ctx):
+    swarm = getattr(ctx.rt, "swarm", None)
+    if swarm is None:
+        return "ERROR: swarm is not available in this runtime"
+    tasks = args.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return "ERROR: tasks must be a non-empty list of strings or task objects"
+    try:
+        return swarm.spawn_many(ctx.agent, tasks,
+                                role=str(args.get("role") or "worker"),
+                                tools=args.get("tools") or "role",
+                                max_parallel=args.get("max_parallel"),
+                                join=args.get("join") or "all",
+                                timeout=args.get("timeout"))
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+
+
+def _tool_agent_status(args, ctx):
+    swarm = getattr(ctx.rt, "swarm", None)
+    if swarm is None:
+        return "ERROR: swarm is not available in this runtime"
+    ids = args.get("ids")
+    return swarm.status_lines(list(ids) if ids else None)
+
+
+def _tool_agent_wait(args, ctx):
+    swarm = getattr(ctx.rt, "swarm", None)
+    if swarm is None:
+        return "ERROR: swarm is not available in this runtime"
+    ids = args.get("ids")
+    if not ids:
+        return "ERROR: ids is required"
+    lines = swarm.wait(list(ids), timeout=args.get("timeout"))
+    return lines + "\n\n" + swarm.status_lines(list(ids))
+
+
+def _tool_agent_send(args, ctx):
+    swarm = getattr(ctx.rt, "swarm", None)
+    if swarm is None:
+        return "ERROR: swarm is not available in this runtime"
+    if not args.get("id") or args.get("message") is None:
+        return "ERROR: id and message are required"
+    return swarm.send(str(args["id"]), str(args["message"]))
+
+
+def _tool_agent_kill(args, ctx):
+    swarm = getattr(ctx.rt, "swarm", None)
+    if swarm is None:
+        return "ERROR: swarm is not available in this runtime"
+    if not args.get("id"):
+        return "ERROR: id is required"
+    return swarm.kill(str(args["id"]))
+
+
+def _tool_agent_result(args, ctx):
+    swarm = getattr(ctx.rt, "swarm", None)
+    if swarm is None:
+        return "ERROR: swarm is not available in this runtime"
+    if not args.get("id"):
+        return "ERROR: id is required"
+    return swarm.format_report(str(args["id"]))
+
+
 def register(reg) -> None:
     reg.register(Tool(
         "todo", "Persisted plan tracker. Pass items to set ('x done item' marks done); "
@@ -102,3 +190,67 @@ def register(reg) -> None:
         "reload_tools", "Rescan ~/.hydra/tools/*.py and reload plugin tools.",
         {"type": "object", "properties": {}},
         _tool_reload_tools))
+
+    # ---------------------------------------------- sub-agents (§9.2)
+    reg.register(Tool(
+        "spawn_agent",
+        "Delegate one self-contained task to a sub-agent with its own context. "
+        "The sub-agent sees ONLY what you write here. Returns its report.",
+        {"type": "object", "properties": {
+            "task": {"type": "string", "description": "Complete instructions, "
+                     "inputs, paths, and what 'done' looks like."},
+            "role": {"type": "string",
+                     "enum": ["worker", "researcher", "coder", "debugger",
+                              "tester", "reviewer", "scribe", "planner"]},
+            "model": {"type": "string", "description": "Optional override. "
+                      "Default: the role's chain."},
+            "tools": {"type": "string", "description": "'role' (preset, default) "
+                      "| 'all' | comma-separated names"},
+            "context_files": {"type": "array", "items": {"type": "string"}},
+            "wait": {"type": "boolean", "default": True}},
+         "required": ["task"]},
+        _tool_spawn_agent, group="agents"))
+    reg.register(Tool(
+        "spawn_swarm",
+        "Launch several sub-agents at once and join as specified. Each task is a "
+        "string or {task, role, model, tools}.",
+        {"type": "object", "properties": {
+            "tasks": {"type": "array", "items": {}},
+            "role": {"type": "string"},
+            "tools": {"type": "string"},
+            "max_parallel": {"type": "integer"},
+            "join": {"type": "string", "enum": ["all", "first", "quorum"]},
+            "timeout": {"type": "number"}},
+         "required": ["tasks"]},
+        _tool_spawn_swarm, group="agents"))
+    reg.register(Tool(
+        "agent_status", "One-line status per agent (id, status, depth, role, "
+        "tokens, task).",
+        {"type": "object", "properties": {"ids": {"type": "array",
+                                                  "items": {"type": "string"}}}},
+        _tool_agent_status, group="agents"))
+    reg.register(Tool(
+        "agent_wait", "Block until the listed agents finish (optional timeout).",
+        {"type": "object", "properties": {
+            "ids": {"type": "array", "items": {"type": "string"}},
+            "timeout": {"type": "number"}},
+         "required": ["ids"]},
+        _tool_agent_wait, group="agents"))
+    reg.register(Tool(
+        "agent_send", "Steer a running agent; the message is delivered at its "
+        "next turn boundary.",
+        {"type": "object", "properties": {"id": {"type": "string"},
+                                          "message": {"type": "string"}},
+         "required": ["id", "message"]},
+        _tool_agent_send, group="agents"))
+    reg.register(Tool(
+        "agent_kill", "Stop an agent (and its children) at its next boundary; "
+        "its background jobs are killed.",
+        {"type": "object", "properties": {"id": {"type": "string"}},
+         "required": ["id"]},
+        _tool_agent_kill, group="agents"))
+    reg.register(Tool(
+        "agent_result", "Fetch a (finished or running) agent's report again.",
+        {"type": "object", "properties": {"id": {"type": "string"}},
+         "required": ["id"]},
+        _tool_agent_result, group="agents"))

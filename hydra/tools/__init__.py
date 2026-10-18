@@ -137,6 +137,16 @@ class Executor:
         self.rt = rt
         n = max(1, int(C.get(rt.cfg, "loop.parallel_tools", 4) or 4))
         self.pool = ThreadPoolExecutor(max_workers=n, thread_name_prefix="tool")
+        # agent_* tools may block (agent_wait) — keep them off the main pool so
+        # a blocked parent can never starve its children's tool calls.
+        self.agent_pool = ThreadPoolExecutor(max_workers=16,
+                                             thread_name_prefix="agenttool")
+
+    def _pool_for(self, name: str):
+        tool = self.rt.tools.get(name)
+        if tool is not None and getattr(tool, "group", "") == "agents":
+            return self.agent_pool
+        return self.pool
 
     def run(self, calls: list, agent) -> list:
         """Run calls (possibly in parallel), return tool messages in call order."""
@@ -147,7 +157,7 @@ class Executor:
             args = call["function"]["arguments"]
             if self.rt.journal:
                 self.rt.journal.event("tool_call", agent.id, tool=name, args=args, idx=i)
-            futures[self.pool.submit(self._invoke, name, args, agent)] = i
+            futures[self._pool_for(name).submit(self._invoke, name, args, agent)] = i
         for fut, i in futures.items():
             try:
                 results[i] = fut.result()

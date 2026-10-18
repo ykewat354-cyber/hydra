@@ -41,7 +41,8 @@ class Router:
         self._retries = max(1, int(C.get(cfg, "api.retries", 5) or 5))
 
     # ------------------------------------------------------------ chains
-    def chain_for(self, role: str, exclude=(), need_tools: bool = False) -> list:
+    def chain_for(self, role: str, exclude=(), need_tools: bool = False,
+                  model_hint: str = None) -> list:
         chain = list(C.get(self.cfg, f"roles.{role}.chain") or
                      C.get(self.cfg, "roles.lead.chain") or [])
         if self.registry is not None:
@@ -57,6 +58,13 @@ class Router:
             if not ranked:
                 return []  # all pruned: chat() decides park vs failure
             chain = ranked
+        if model_hint:
+            allowed = True
+            if self.registry is not None and \
+                    self.registry.status_of(model_hint) in ("paid", "missing"):
+                allowed = False
+            if allowed:
+                chain = [model_hint] + [m for m in chain if m != model_hint]
         if exclude:
             filtered = [m for m in chain if m not in exclude]
             if filtered:
@@ -181,7 +189,9 @@ class Router:
     # ------------------------------------------------------------ chat
     def chat(self, messages: list, role: str = "lead", tools=None, think=None,
              agent=None, exclude=(), mode=None, on_delta=None) -> "client.Reply":
-        chain = self.chain_for(role, exclude, need_tools=bool(tools))
+        chain = self.chain_for(role, exclude, need_tools=bool(tools),
+                               model_hint=getattr(agent, "model_override", None)
+                               if agent is not None else None)
         errors = []
         all_paid = True
         if not chain:

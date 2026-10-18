@@ -17,6 +17,7 @@ from .gate import LLMGate
 from .loop import run_agent
 from .models import ModelRegistry
 from .router import AllModelsFailed, Router
+from .swarm import Swarm
 from .tools import Executor, Registry
 
 
@@ -48,6 +49,7 @@ class Runtime:
         self.executor = Executor(self)
         self.agents: dict = {}
         self.jobs: dict = {}
+        self.swarm = Swarm(self)
         self._agent_seq = 0
         self._job_seq = 0
         self._lock = threading.RLock()
@@ -58,6 +60,19 @@ class Runtime:
             aid = f"a{self._agent_seq}"
             self._agent_seq += 1
             return aid
+
+    def _sync_agent_seq(self) -> None:
+        """Never reuse an id: children continue after the highest existing a<N>."""
+        mx = 0
+        jdir = getattr(self.journal, "dir", None)
+        if jdir is not None:
+            for p in (jdir / "agents").glob("a*"):
+                try:
+                    mx = max(mx, int(p.name[1:]))
+                except ValueError:
+                    pass
+        with self._lock:
+            self._agent_seq = max(self._agent_seq, mx + 1)
 
     def next_job_id(self) -> str:
         with self._lock:
@@ -108,6 +123,8 @@ class Runtime:
                      env_block=self.env_block)
         self._setup_agent(lead)
         self.agents = {lead.id: lead}
+        self.swarm = Swarm(self)
+        self._sync_agent_seq()
         self.run_meta = {"run": self.run_id, "name": name or "", "task": task,
                          "cwd": str(self.cwd), "status": "running",
                          "started": time.time(), "pid": os.getpid(),
@@ -146,9 +163,18 @@ class Runtime:
                                         "effects unknown. Inspect state before repeating."})
         lead.messages = msgs
         self.agents = {lead.id: lead}
+        self.swarm = Swarm(self)
+        self._sync_agent_seq()
         self.run_meta = dict(data)
         self.run_meta["status"] = "running"
         self.journal.event("run_resume", None)
+        # re-attach children that were alive when the process was killed
+        try:
+            n = self.swarm.rebuild()
+            if n:
+                self.journal.event("swarm_reattach", None, n=n)
+        except Exception:
+            pass
         return lead
 
     # -------------------------------------------------- execution
@@ -217,7 +243,8 @@ class Runtime:
     def close(self) -> None:
         if self.journal:
             self.journal.close()
-        try:
-            self.executor.pool.shutdown(wait=False)
-        except Exception:
-            pass
+        for pool in (self.executor.pool, self.executor.agent_pool):
+            try:
+                pool.shutdown(wait=False)
+            except Exception:
+                pass
