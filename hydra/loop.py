@@ -7,6 +7,7 @@ journal a turn boundary. The stall detector, not a counter, stops runaway loops.
 from __future__ import annotations
 
 from . import config as C
+from . import verifier
 from .agent import normalize_call, parse_text_calls
 from .client import ContextOverflow
 from .router import AllModelsFailed
@@ -68,6 +69,10 @@ def run_agent(agent, rt) -> dict:
             agent.append_tool_results(results)
 
             if agent.finished:
+                # independent verification (§5.3): a failed review puts the
+                # agent back in the loop with the issues injected as steering
+                if verifier.run_once(rt, agent):
+                    continue
                 break
             agent.stall_check(rt, calls, results)
             if rt.journal:

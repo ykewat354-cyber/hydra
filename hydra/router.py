@@ -7,6 +7,7 @@ everything must work with them set to None.
 from __future__ import annotations
 
 import contextlib
+import json
 import random
 import threading
 import time
@@ -188,10 +189,12 @@ class Router:
 
     # ------------------------------------------------------------ chat
     def chat(self, messages: list, role: str = "lead", tools=None, think=None,
-             agent=None, exclude=(), mode=None, on_delta=None) -> "client.Reply":
+             agent=None, exclude=(), mode=None, on_delta=None,
+             model: str = None) -> "client.Reply":
+        hint = model or (getattr(agent, "model_override", None)
+                         if agent is not None else None)
         chain = self.chain_for(role, exclude, need_tools=bool(tools),
-                               model_hint=getattr(agent, "model_override", None)
-                               if agent is not None else None)
+                               model_hint=hint)
         errors = []
         all_paid = True
         if not chain:
@@ -284,6 +287,290 @@ class Router:
             errors.append(RuntimeError("all candidate models skipped (breakers open)"))
             all_paid = False
         raise AllModelsFailed(errors, all_paid=all_paid)
+
+    # ------------------------------------------------------------ multi-model (§7.5)
+    def _capacity(self) -> int:
+        if self.gate is None:
+            return 1
+        return max(1, int(getattr(self.gate, "plan_cap", 1) or 1))
+
+    def _default_models(self, role: str, n: int = None, mode: str = None) -> list:
+        default_n = {"race": 2, "vote": 3, "moa": 2, "critic": 1, "cascade": 2}.get(
+            str(mode or "").lower(), 1)
+        n = max(1, int(n or default_n))
+        chain = self.chain_for(role, need_tools=False) or self.chain_for("lead")
+        return list(chain[:n])
+
+    def _judge_model(self, producers) -> str:
+        producers = set(producers or [])
+        chain = self.chain_for("critic", need_tools=False) or self.chain_for("lead")
+        for m in chain:
+            if m not in producers:
+                return m
+        return chain[0] if chain else None
+
+    def _one(self, messages, role, model, think=None, agent=None, on_delta=None):
+        return self.chat(messages, role=role, think=think, agent=agent,
+                         model=model, on_delta=on_delta)
+
+    def _gather(self, messages, models, role, think=None, agent=None) -> dict:
+        """Call every model; truly parallel only when the gate has room."""
+        out = {}
+        cap = self._capacity()
+        if len(models) > 1 and cap >= len(models):
+            lock = threading.Lock()
+
+            def call(m):
+                try:
+                    r = self._one(messages, role, m, think, agent)
+                except Exception as exc:
+                    r = exc
+                with lock:
+                    out[m] = r
+
+            threads = [threading.Thread(target=call, args=(m,), daemon=True)
+                       for m in models]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        else:
+            for m in models:  # free plan: serial, still one call per model
+                try:
+                    out[m] = self._one(messages, role, m, think, agent)
+                except Exception as exc:
+                    out[m] = exc
+        return out
+
+    @staticmethod
+    def _structured_choice(text: str):
+        from .agent import parse_json_blob  # tolerant JSON extractor
+        obj = parse_json_blob(text or "")
+        if not isinstance(obj, dict):
+            return None
+        for key in ("choice", "answer", "result", "verdict", "value"):
+            if key in obj:
+                return json.dumps(obj[key], sort_keys=True, ensure_ascii=False)
+        return json.dumps(obj, sort_keys=True, ensure_ascii=False)[:200]
+
+    def race(self, messages, models, role="lead", think=None, agent=None,
+             timeout=None) -> dict:
+        models = list(models)
+        errors = []
+        cap = self._capacity()
+        if len(models) > 1 and cap >= len(models):
+            # true race: fire together; the first valid reply wins
+            done = threading.Event()
+            winner = {}
+            lock = threading.Lock()
+
+            def call(m):
+                try:
+                    r = self._one(messages, role, m, think, agent)
+                except Exception as exc:
+                    with lock:
+                        errors.append(exc)
+                    return
+                with lock:
+                    if not winner and not self._is_empty(r):
+                        winner["model"], winner["reply"] = m, r
+                        done.set()
+
+            threads = [threading.Thread(target=call, args=(m,), daemon=True)
+                       for m in models]
+            for t in threads:
+                t.start()
+            deadline = None if timeout is None else time.time() + float(timeout)
+            while not done.is_set():
+                if deadline is not None and time.time() >= deadline:
+                    break
+                if all(not t.is_alive() for t in threads):
+                    break
+                time.sleep(0.02)
+            if winner:
+                return {"mode": "race", "model": winner["model"],
+                        "reply": winner["reply"], "text": winner["reply"].content}
+        else:
+            # free plan / no room: degrade to sequential first-valid
+            for m in models:
+                try:
+                    r = self._one(messages, role, m, think, agent)
+                except Exception as exc:
+                    errors.append(exc)
+                    continue
+                if not self._is_empty(r):
+                    return {"mode": "race-seq", "model": m, "reply": r,
+                            "text": r.content}
+        if errors:
+            raise AllModelsFailed(errors, all_paid=False)
+        raise AllModelsFailed([RuntimeError("race: no model produced a reply")])
+
+    def vote(self, messages, models, role="lead", think=None, agent=None) -> dict:
+        replies = self._gather(messages, models, role, think, agent)
+        good = {m: r for m, r in replies.items()
+                if isinstance(r, Reply) and not self._is_empty(r)}
+        if not good:
+            errs = [r for r in replies.values() if isinstance(r, Exception)]
+            raise AllModelsFailed(errs or [RuntimeError("vote: no answers")],
+                                  all_paid=False)
+        choices = {}
+        for m, r in good.items():
+            c = self._structured_choice(r.content)
+            if c is None:
+                choices = None
+                break
+            choices[m] = c
+        lines = "\n".join(f"({i + 1}) {m}: {r.content[:600]}"
+                          for i, (m, r) in enumerate(good.items()))
+        if choices:
+            counts = {}
+            for m, c in choices.items():
+                counts.setdefault(c, []).append(m)
+            ranked = sorted(counts.items(), key=lambda kv: -len(kv[1]))
+            if len(ranked) == 1 or len(ranked[0][1]) > len(ranked[1][1]):
+                top = ranked[0][0]
+                win_model = counts[top][0]
+                return {"mode": "vote", "model": win_model, "votes": choices,
+                        "text": good[win_model].content,
+                        "journal_note": f"majority {top} ({len(counts[top])}/{len(choices)})"}
+        judge = self._judge_model(list(good))
+        prompt = ("Pick the best answer to the question below. Answer with JSON only: "
+                  '{"choice": <number>, "reason": "..."}.\n\n'
+                  f"QUESTION:\n{messages[-1].get('content', '')[:1500]}\n\n"
+                  f"ANSWERS:\n{lines}")
+        jr = self._one([{"role": "user", "content": prompt}], "critic", judge,
+                       think, agent)
+        idx = 0
+        from .agent import parse_json_blob
+        obj = parse_json_blob(jr.content or "")
+        if isinstance(obj, dict):
+            try:
+                idx = max(1, min(len(good), int(obj.get("choice") or 1))) - 1
+            except Exception:
+                idx = 0
+        win_model = list(good)[idx]
+        return {"mode": "vote+judge", "model": win_model, "judge": judge,
+                "votes": choices, "text": good[win_model].content}
+
+    def moa(self, messages, models, role="lead", think=None, agent=None) -> dict:
+        replies = self._gather(messages, models, role, think, agent)
+        good = {m: r for m, r in replies.items()
+                if isinstance(r, Reply) and not self._is_empty(r)}
+        if not good:
+            raise AllModelsFailed([RuntimeError("moa: no proposals")], all_paid=False)
+        if len(good) == 1:
+            m = list(good)[0]
+            return {"mode": "moa", "model": m, "text": good[m].content}
+        drafts = "\n\n".join(f"--- draft from {m} ---\n{r.content[:2500]}"
+                             for m, r in good.items())
+        agg = self._judge_model(list(good))
+        prompt = ("You are the aggregator in a mixture-of-agents run. Synthesize the "
+                  "single best final answer from the drafts below. Keep every correct "
+                  "fact, drop errors, be concise.\n\n"
+                  f"TASK:\n{messages[-1].get('content', '')[:1500]}\n\n{drafts}")
+        r = self._one([{"role": "user", "content": prompt}], "lead", agg, think, agent)
+        return {"mode": "moa", "model": agg, "aggregator": agg,
+                "proposers": list(good), "text": r.content}
+
+    def critic_mode(self, messages, models, role="lead", think=None, agent=None,
+                    rounds=2) -> dict:
+        models = list(models) or self._default_models(role, 1)
+        producer = models[0]
+        crit = self._judge_model([producer]) or producer
+        draft = self._one(messages, role, producer, think, agent)
+        done_rounds = 0
+        for i in range(max(1, int(rounds))):
+            done_rounds = i + 1
+            review = self._one(
+                [{"role": "user", "content":
+                  "Review this draft against the task. Reply with JSON only: "
+                  '{"issues": [{"what": "...", "fix": "..."}]} (empty list if good).\n\n'
+                  f"TASK:\n{messages[-1].get('content', '')[:1500]}\n\n"
+                  f"DRAFT:\n{draft.content[:3000]}"}],
+                "critic", crit, think, agent)
+            from .agent import parse_json_blob
+            obj = parse_json_blob(review.content or "")
+            issues = []
+            if isinstance(obj, dict):
+                raw = obj.get("issues") or []
+                if isinstance(raw, list):
+                    issues = [("; ".join(str(v) for v in it.values())
+                               if isinstance(it, dict) else str(it)) for it in raw]
+            if not issues:
+                break
+            draft = self._one(
+                list(messages) + [
+                    {"role": "assistant", "content": draft.content[:3000]},
+                    {"role": "user", "content":
+                     "A critic reviewed your draft:\n- " + "\n- ".join(issues)
+                     + "\n\nRevise and return the improved final answer only."}],
+                role, producer, think, agent)
+        return {"mode": "critic", "model": producer, "critic": crit,
+                "rounds": done_rounds, "text": draft.content}
+
+    @staticmethod
+    def accept_ok(text: str, accept) -> bool:
+        text = text or ""
+        accept = str(accept or "nonempty").lower()
+        if accept in ("", "nonempty", "any"):
+            return bool(text.strip())
+        if accept == "json":
+            from .agent import parse_json_blob
+            return parse_json_blob(text) is not None
+        if accept.startswith("regex:"):
+            import re as _re
+            try:
+                return _re.search(accept.split(":", 1)[1], text, _re.S) is not None
+            except Exception:
+                return bool(text.strip())
+        return bool(text.strip())
+
+    def cascade(self, messages, models=None, role="worker", accept="nonempty",
+                think=None, agent=None) -> dict:
+        models = list(models or self._default_models(role, 2, mode="cascade"))
+        errors = []
+        last = None
+        last_model = None
+        for m in models:
+            try:
+                r = self._one(messages, role, m, think, agent)
+            except Exception as exc:
+                errors.append(exc)
+                continue
+            last, last_model = r, m
+            if self.accept_ok(r.content, accept):
+                return {"mode": "cascade", "model": m, "accepted": True,
+                        "text": r.content}
+        if last is not None:
+            return {"mode": "cascade", "model": last_model, "accepted": False,
+                    "text": last.content}
+        raise AllModelsFailed(errors or [RuntimeError("cascade: no models")],
+                              all_paid=False)
+
+    def multi(self, prompt: str = None, mode: str = "vote", role: str = "lead",
+              models=None, n: int = None, messages=None, accept=None,
+              rounds: int = 2, think=None, agent=None) -> dict:
+        """Dispatcher behind the ask_models tool (§7.5). Returns a dict with text."""
+        msgs = messages or [{"role": "user", "content": str(prompt or "")}]
+        mode = str(mode or "vote").lower()
+        models = [str(m) for m in (models or [])] or \
+            self._default_models(role, n, mode=mode)
+        if mode in ("fallback", "single"):
+            r = self._one(msgs, role, models[0] if models else None, think, agent)
+            return {"mode": "fallback", "model": r.model, "text": r.content}
+        if mode == "race":
+            return self.race(msgs, models, role, think, agent)
+        if mode == "vote":
+            return self.vote(msgs, models, role, think, agent)
+        if mode == "moa":
+            return self.moa(msgs, models, role, think, agent)
+        if mode == "critic":
+            return self.critic_mode(msgs, models, role, think, agent, rounds=rounds)
+        if mode == "cascade":
+            return self.cascade(msgs, models, role, accept=accept, think=think,
+                                agent=agent)
+        raise ValueError(f"unknown mode {mode!r} "
+                         f"(fallback|race|vote|moa|critic|cascade)")
 
 
 # re-export for convenience

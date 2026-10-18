@@ -155,6 +155,31 @@ def _tool_agent_result(args, ctx):
     return swarm.format_report(str(args["id"]))
 
 
+# ------------------------------------------------------ multi-model (§7.5)
+
+def _tool_ask_models(args, ctx):
+    prompt = args.get("prompt") or args.get("question")
+    if not prompt:
+        return "ERROR: prompt is required"
+    mode = str(args.get("mode") or "vote").lower()
+    models = args.get("models")
+    if models is not None and not isinstance(models, list):
+        return "ERROR: models must be a list of model names"
+    try:
+        out = ctx.rt.router.multi(
+            prompt=str(prompt), mode=mode,
+            role=str(args.get("role") or "lead"),
+            models=[str(m) for m in (models or [])],
+            n=args.get("n"), accept=args.get("accept"),
+            rounds=int(args.get("rounds") or 2), agent=ctx.agent)
+    except Exception as exc:
+        return f"ERROR: ask_models({mode}) failed: {type(exc).__name__}: {exc}"
+    text = str(out.get("text") or "")
+    return (f"{text}\n\n[ask_models: mode={out.get('mode')} "
+            f"model={out.get('model')} "
+            f"judge={out.get('judge') or out.get('aggregator') or '-'}]")
+
+
 def register(reg) -> None:
     reg.register(Tool(
         "todo", "Persisted plan tracker. Pass items to set ('x done item' marks done); "
@@ -254,3 +279,20 @@ def register(reg) -> None:
         {"type": "object", "properties": {"id": {"type": "string"}},
          "required": ["id"]},
         _tool_agent_result, group="agents"))
+    reg.register(Tool(
+        "ask_models",
+        "Ask several models the same question with a strategy and get one answer "
+        "back. Degrades safely on a single free-plan slot.",
+        {"type": "object", "properties": {
+            "prompt": {"type": "string"},
+            "mode": {"type": "string",
+                     "enum": ["vote", "race", "moa", "critic", "cascade"]},
+            "models": {"type": "array", "items": {"type": "string"},
+                       "description": "Optional explicit models (default: the role chain)."},
+            "role": {"type": "string"},
+            "n": {"type": "integer", "description": "How many models to use."},
+            "accept": {"type": "string",
+                       "description": "cascade only: nonempty | json | regex:<pattern>"},
+            "rounds": {"type": "integer", "description": "critic only (default 2)."}},
+         "required": ["prompt"]},
+        _tool_ask_models, group="core"))

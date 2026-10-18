@@ -17,6 +17,29 @@ from . import config as C
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 
+def parse_json_blob(text: str):
+    """Tolerant JSON extraction: raw, fenced, or first balanced {...}."""
+    if not text:
+        return None
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())
+        except Exception:
+            pass
+    for obj in _balanced_objects(text, limit=3):
+        try:
+            return json.loads(obj)
+        except Exception:
+            continue
+    return None
+
+
 # ---------------------------------------------------------------- prompts
 
 def load_prompt(name: str) -> str:
@@ -216,6 +239,7 @@ class Agent:
         self.journal = None
         self.runtime = None
         self._stall_window: list = []
+        self.verify_rounds_left = int(C.get(cfg, "loop.verify_rounds", 3) or 3)
 
     # -------------------------------------------------- messaging
     def append(self, message: dict) -> None:
@@ -247,6 +271,10 @@ class Agent:
     def nudge(self, text: str) -> None:
         self.nudges += 1
         self.append({"role": "user", "content": text})
+
+    def steer(self, text: str) -> None:
+        """Inject a user message without spending the no-tool nudge budget."""
+        self.append({"role": "user", "content": str(text)})
 
     # -------------------------------------------------- context
     def api_messages(self) -> list:

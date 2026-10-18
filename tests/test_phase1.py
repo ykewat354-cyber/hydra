@@ -66,7 +66,7 @@ class EndToEndTests(Base):
                                                                  "summary": "hello.py created and executed",
                                                                  "files_changed": ["hello.py"],
                                                                  "commands_run": ["python hello.py -> 42"]}}}]})
-        rt = Runtime(self.cfg(), cwd=self.cwd.name, quiet=True)
+        rt = Runtime(self.cfg("loop.verify=never"), cwd=self.cwd.name, quiet=True)
         try:
             code, report = rt.run("create hello.py printing 42 and run it")
             run_id = rt.run_id
@@ -107,7 +107,8 @@ class EndToEndTests(Base):
                 "--set", "api.retries=2",
                 "--set", "journal.fsync=event",
                 "--set", "termux.wake_lock=false",
-                "--set", "termux.notify_on_finish=false"]
+                "--set", "termux.notify_on_finish=false",
+                "--set", "termux.notify_on_park=false"]
         proc = subprocess.Popen(base + ["run the two-step task"],
                                 cwd=self.cwd.name, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
