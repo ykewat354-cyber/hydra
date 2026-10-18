@@ -27,6 +27,7 @@ class Tui:
         except Exception:
             self.cols = 80
         self.ascii = os.environ.get("HYDRA_ASCII") == "1"
+        self.narrow = self.cols < 60  # phone split-screen: shrink lines to fit
 
     # -------------------------------------------------- primitives
     def _out(self, text: str) -> None:
@@ -38,7 +39,11 @@ class Tui:
 
     def _agent_tag(self, ev) -> str:
         a = str(ev.get("agent") or "run")
-        return f"[{a:<11}]"
+        return f"[{a}]" if self.narrow else f"[{a:<11}]"
+
+    def _body(self, prefix: str, body: str, wide_cap: int = 80) -> str:
+        cap = wide_cap if not self.narrow else max(16, self.cols - len(prefix))
+        return prefix + _one_line(body, cap)
 
     def event(self, ev: dict) -> None:
         if self.json_out:
@@ -49,15 +54,16 @@ class Tui:
         t = ev.get("type")
         tag = self._agent_tag(ev)
         if t == "run_start":
-            self._out(f">> {ev.get('run')}  task={_one_line(ev.get('task'), 70)}")
+            self._out(self._body(f">> {ev.get('run')}  task=", ev.get("task"), 70))
         elif t == "run_resume":
             self._out(f">> resume {ev.get('run')}")
         elif t == "tool_call":
-            self._out(f"{tag} tool {ev.get('tool')} {_one_line(ev.get('args'), 80)}")
+            self._out(self._body(f"{tag} tool {ev.get('tool')} ", ev.get("args")))
         elif t == "tool_result":
             prev = _one_line(ev.get("preview"), 70)
             mark = "!" if prev.startswith("ERROR") else "ok"
-            self._out(f"{tag}   {mark} {ev.get('tool')}: {prev}")
+            self._out(self._body(f"{tag}   {mark} {ev.get('tool')}: ",
+                                 ev.get("preview"), 70))
         elif t == "model_response":
             calls = ev.get("tool_calls") or []
             extra = f" calls={','.join(str(c) for c in calls)}" if calls else ""
@@ -65,7 +71,8 @@ class Tui:
                       f"in={ev.get('in_tokens')} out={ev.get('out_tokens')}{extra}")
         elif t == "report":
             rep = ev.get("report") or {}
-            self._out(f"{tag} report {rep.get('status')}: {_one_line(rep.get('summary'), 70)}")
+            self._out(self._body(f"{tag} report {rep.get('status')}: ",
+                                 rep.get("summary"), 70))
         elif t == "park":
             self._out(f"{tag} parked ({ev.get('reason')})")
         elif t == "stall":
