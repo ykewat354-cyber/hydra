@@ -65,12 +65,29 @@ def check(rt, agent) -> dict:
     base = load_prompt("verifier") or (
         'You are an independent verifier. Reply with JSON only: '
         '{"verdict":"pass"|"fail","issues":[{"what":"...","fix":"..."}]}')
+    evidence = []
+    for msg in reversed(getattr(agent, "messages", []) or []):
+        if msg.get("role") != "tool":
+            continue
+        name = str(msg.get("tool_name") or "tool")
+        if name in ("finish", "todo", "note", "recall"):
+            continue
+        text = str(msg.get("content") or "").strip()
+        if not text:
+            continue
+        evidence.append(f"[{name}]\n{text[:1200]}")
+        if len(evidence) >= 6:
+            break
+    evidence.reverse()
     claim = (
         f"TASK:\n{agent.task[:1500]}\n\n"
         f"FINAL SUMMARY:\n{str(rep.get('summary') or '')[:1500]}\n\n"
         f"FILES CHANGED:\n" + "\n".join(rep.get("files_changed") or ["(none)"]) +
         "\n\nCOMMANDS RUN:\n" + "\n".join(rep.get("commands_run") or ["(none)"]) +
-        "\n\nOPEN ISSUES:\n" + "\n".join(rep.get("open_issues") or ["(none)"]))
+        "\n\nOPEN ISSUES:\n" + "\n".join(rep.get("open_issues") or ["(none)"]) +
+        "\n\nARTIFACTS:\n" + str(rep.get("artifacts") or "(none)")[:2000] +
+        "\n\nEVIDENCE (recent tool calls with outputs, oldest first):\n" +
+        ("\n\n".join(evidence) or "(none)"))
     prompt = base + "\n\n" + claim
     try:
         reply = rt.router.chat([{"role": "user", "content": prompt}],
@@ -111,9 +128,28 @@ def run_once(rt, agent) -> bool:
     if result.get("verdict") != "fail":
         return False
     agent.verify_rounds_left -= 1
-    agent.finished = False
     text = result.get("issue_text") or "\n".join(
         str(i) for i in (result.get("issues") or [])) or "(no details)"
+    if agent.verify_rounds_left <= 0:
+        # Cap reached (§5.3): stop re-entering the loop. Keep the rejection in
+        # the report so the user sees why the run ended partial.
+        rep = agent.report if isinstance(agent.report, dict) else None
+        if rep is not None:
+            issues = rep.setdefault("open_issues", [])
+            try:
+                issues.append("verifier rejected the finish: " + text[:400])
+            except Exception:
+                pass
+            if str(rep.get("status") or "") == "done":
+                rep["status"] = "partial"
+        if rt.journal:
+            try:
+                rt.journal.event("verify_cap", agent.id, model=result.get("model"))
+            except Exception:
+                pass
+        agent.finished = True
+        return False
+    agent.finished = False
     agent.steer(
         "An independent reviewer REJECTED your finish (round "
         f"{result.get('model') or '?'}). Issues:\n{text}\n\n"

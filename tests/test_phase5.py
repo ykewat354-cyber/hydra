@@ -178,7 +178,8 @@ class VerifierTests(Base):
         self.assertEqual(self.srv.seen_models, ["gpt-oss:120b"])
 
     def test_verify_rounds_exhaust_then_accept(self):
-        """A stubborn verifier cannot loop forever: after verify_rounds, accept."""
+        """A stubborn verifier cannot loop forever: after verify_rounds the run
+        ends, and the rejection is recorded as a partial result."""
         from hydra.runtime import Runtime
         from hydra import journal as J
 
@@ -195,9 +196,36 @@ class VerifierTests(Base):
         finally:
             rt.close()
         self.assertEqual(code, 0, report)
-        verifies = [e for e in J.read_events(rid) if e.get("type") == "verify"]
+        events = J.read_events(rid)
+        verifies = [e for e in events if e.get("type") == "verify"]
         self.assertEqual(len(verifies), 2)
-        self.assertEqual(report["status"], "done")
+        self.assertEqual(len([e for e in events if e.get("type") == "verify_cap"]), 1)
+        self.assertEqual(report["status"], "partial")
+        self.assertTrue(any("verifier rejected" in str(i)
+                            for i in report.get("open_issues") or []))
+
+    def test_verifier_prompt_includes_recent_tool_evidence(self):
+        from hydra.runtime import Runtime
+
+        self.srv.add("gpt-oss:120b",
+                     {"tool_calls": [{"function": {
+                         "name": "bash",
+                         "arguments": {"cmd": "printf 'EVIDENCE-OK\\n'"}}}]},
+                     finish_files("ran the command", ["x.py"]))
+        self.srv.add("nemotron-3-ultra",
+                     {"content": '{"verdict": "pass", "issues": []}'})
+        rt = Runtime(self.cfg(), cwd=self.cwd.name, quiet=True)
+        try:
+            code, report = rt.run("run the evidence command")
+        finally:
+            rt.close()
+        self.assertEqual(code, 0, report)
+        bodies = [r["body"] for r in self.srv.chat_requests()
+                  if r["body"].get("model") == "nemotron-3-ultra"]
+        self.assertTrue(bodies)
+        payload = json.dumps(bodies[0])
+        self.assertIn("EVIDENCE-OK", payload)
+        self.assertIn("EVIDENCE (recent tool calls", payload)
 
 
 if __name__ == "__main__":
