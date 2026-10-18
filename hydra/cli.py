@@ -219,7 +219,25 @@ def main(argv=None) -> int:
 
 # ------------------------------------------------------------------ run
 
+def _key_preflight(cfg) -> bool:
+    """Friendly stop when the real Ollama Cloud host has no API key.
+    Local/fake hosts are exempt so tests never need one."""
+    host = str(C.get(cfg, "api.host", "https://ollama.com") or "")
+    if C.load_key(cfg) or "ollama.com" not in host:
+        return True
+    print("No Ollama API key found.\n"
+          "\n"
+          "  1. Create a key: https://ollama.com/settings/keys  (free plan works)\n"
+          "  2. Save it:     echo 'YOUR_KEY' > ~/.hydra/key && chmod 600 ~/.hydra/key\n"
+          "     (or export OLLAMA_API_KEY=your_key)\n"
+          "  3. Check:       hydra models probe\n"
+          "  4. Run:         hydra \"your task\"")
+    return False
+
+
 def cmd_run(cfg, task, o) -> int:
+    if not _key_preflight(cfg):
+        return 2
     if o.detach:
         return _spawn_detached(cfg, task, o)
     from .runtime import Runtime
@@ -409,6 +427,8 @@ def cmd_undo(cfg, args, o) -> int:
 
 def cmd_eval(cfg, args, o) -> int:
     """`hydra eval` (§19.11): scripted fake-server suites, zero credits."""
+    if "--real" in args and not _key_preflight(cfg):
+        return 2
     from . import evals
     return evals.cli(cfg, args)
 
@@ -470,6 +490,8 @@ def _spawn_detached(cfg, task, o) -> int:
 
 
 def cmd_resume(cfg, args, o) -> int:
+    if not _key_preflight(cfg):
+        return 2
     from .runtime import Runtime
     which = args[0] if args else None
     rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
@@ -512,6 +534,8 @@ def cmd_repl(cfg, o) -> int:
     """Interactive mode: the run works in a background thread while stdin
     stays free — type to steer, or use /commands. Nothing here gates the
     agent; it only adds a way to talk to it."""
+    if not _key_preflight(cfg):
+        return 2
     from .runtime import Runtime
     rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
     rt.wake_lock()
@@ -738,6 +762,8 @@ def cmd_daemon(cfg, args) -> int:
     """Watch ~/.hydra/queue/*.md: run each as a task, write the result to
     queue/done/<name>.result.md, remove the source file. This is the
     integration seam for any external bridge (SPEC §13)."""
+    if not _key_preflight(cfg):
+        return 2
     from .runtime import Runtime
     once = "--once" in args
     qdir = C.home() / "queue"
