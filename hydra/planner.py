@@ -40,10 +40,40 @@ def make_dag(rt, task: str, role: str = "planner"):
     except Exception as exc:
         return None, f"planner unavailable: {type(exc).__name__}: {exc}"
     obj = parse_json_blob(reply.content or "")
-    if not isinstance(obj, dict) or not isinstance(obj.get("steps"), list) \
-            or not obj["steps"]:
+    # Models frequently ignore the wrapper: accept a bare list of steps too.
+    if isinstance(obj, list):
+        obj = {"goal": task.strip().splitlines()[0][:160] if task.strip() else "", "steps": obj}
+    if not isinstance(obj, dict):
         return None, "planner returned no DAG"
-    return obj, ""
+    steps = obj.get("steps")
+    if isinstance(steps, dict):
+        steps = [steps]
+    if not isinstance(steps, list) or not steps:
+        return None, "planner returned no DAG"
+    clean = []
+    for i, step in enumerate(steps, 1):
+        if not isinstance(step, dict):
+            continue
+        title = str(step.get("title") or step.get("step") or "").strip()
+        if not title:
+            continue
+        try:
+            sid = int(step.get("id") if step.get("id") is not None else i)
+        except (TypeError, ValueError):
+            sid = i
+        raw_deps = step.get("deps") or []
+        if not isinstance(raw_deps, list):
+            raw_deps = []
+        deps = [int(x) for x in raw_deps if str(x).lstrip("-").isdigit()]
+        role = str(step.get("role") or "").strip()
+        if role not in ("worker", "coder", "researcher", "debugger", "tester", "reviewer"):
+            role = "worker"
+        clean.append({"id": sid, "title": title,
+                      "deps": [d for d in deps if d != sid], "role": role})
+    if not clean:
+        return None, "planner returned no DAG"
+    goal = str(obj.get("goal") or (task.strip().splitlines()[0] if task.strip() else ""))[:200]
+    return {"goal": goal, "steps": clean}, ""
 
 
 def render(dag: dict) -> str:

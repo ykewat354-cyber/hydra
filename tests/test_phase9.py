@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,104 @@ from tests.test_phase1 import Base
 from tests.test_phase2 import finish_node
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+# ---------------------------------------------------------------- client §19.10
+
+class ChunkedStreamTests(unittest.TestCase):
+    def test_http_chunked_ndjson_is_dechunked(self):
+        """Real Ollama Cloud uses Transfer-Encoding: chunked; the fake server
+        doesn't. Reading resp.fp directly used to feed chunk-size lines into
+        the NDJSON parser (int has no .get)."""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from hydra.client import OllamaCloud
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                chunks = [
+                    b'{"message":{"content":"he"}}\n',
+                    b'{"message":{"content":"llo"},"done":false}\n',
+                    b'{"message":{"content":""},"done":true,"eval_count":2}\n',
+                ]
+                for chunk in chunks:
+                    self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+                    self.wfile.flush()
+                    time.sleep(0.01)
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+
+            def log_message(self, *args):
+                pass
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        th = threading.Thread(target=httpd.serve_forever, daemon=True)
+        th.start()
+        try:
+            client = OllamaCloud(f"http://127.0.0.1:{httpd.server_address[1]}",
+                                 "test-key", idle_timeout=10)
+            reply = client.chat("m", [{"role": "user", "content": "hi"}])
+            self.assertEqual(reply.content, "hello")
+            self.assertEqual(reply.eval_count, 2)
+            self.assertEqual(reply.done_reason, "stop")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+# ---------------------------------------------------------------- planner §19.10
+
+class PlannerToleranceTests(unittest.TestCase):
+    def test_bare_list_of_steps_is_accepted(self):
+        from hydra import planner
+
+        class Router:
+            def chat(self, *a, **k):
+                return SimpleNamespace(content=json.dumps([
+                    {"id": 1, "title": "Create file", "deps": [], "role": "coder"},
+                    {"id": 2, "title": "Run it", "deps": [1], "role": "tester"},
+                ]))
+
+        dag, err = planner.make_dag(SimpleNamespace(router=Router()), "do the thing")
+        self.assertEqual(err, "")
+        self.assertEqual([s["title"] for s in dag["steps"]],
+                         ["Create file", "Run it"])
+        self.assertEqual(dag["goal"], "do the thing")
+
+    def test_json_capable_models_rank_first_for_format_calls(self):
+        from hydra import config as C
+        from hydra.router import Router
+
+        class Registry:
+            caps = {
+                "a": {"tools": True, "json": False},
+                "b": {"tools": False, "json": True},
+                "c": {"tools": True, "json": True},
+            }
+
+            def status_of(self, m):
+                return "ok"
+
+            def is_tool_capable(self, m):
+                return self.caps[m]["tools"]
+
+            def is_json_capable(self, m):
+                return self.caps[m]["json"]
+
+            def think_style(self, m):
+                return "none"
+
+        cfg = C.load_config(overrides=['roles.lead.chain=["a","b","c"]'])
+        r = Router(cfg, client=None, registry=Registry())
+        self.assertEqual(r.chain_for("lead", need_json=True), ["b", "c", "a"])
+        self.assertEqual(r.chain_for("lead", need_tools=True), ["a", "c"])
+        self.assertEqual(r.chain_for("lead"), ["a", "b", "c"])
 
 
 # ---------------------------------------------------------------- repo map §19.4

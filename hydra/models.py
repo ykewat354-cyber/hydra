@@ -97,6 +97,12 @@ class ModelRegistry:
             return True  # unknown models are allowed, ranked last
         return bool(e.get("tools", True))
 
+    def is_json_capable(self, model: str) -> bool:
+        e = self.entry(model)
+        if not e or e.get("status") != "ok":
+            return True  # unknown models are allowed, ranked with the good ones
+        return bool(e.get("json", True))
+
     def needs_reprobe(self) -> bool:
         days = float(C.get(self.cfg, "models.reprobe_days", 7) or 7)
         return (time.time() - float(self.data.get("updated") or 0)) > days * 86400

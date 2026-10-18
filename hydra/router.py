@@ -43,19 +43,24 @@ class Router:
 
     # ------------------------------------------------------------ chains
     def chain_for(self, role: str, exclude=(), need_tools: bool = False,
-                  model_hint: str = None) -> list:
+                  model_hint: str = None, need_json: bool = False) -> list:
         chain = list(C.get(self.cfg, f"roles.{role}.chain") or
                      C.get(self.cfg, "roles.lead.chain") or [])
         if self.registry is not None:
-            ok, other = [], []
+            ok, other, last = [], [], []
             for m in chain:
                 st = self.registry.status_of(m)
                 if st in ("paid", "missing"):
                     continue
                 if need_tools and st == "ok" and not self.registry.is_tool_capable(m):
                     continue
-                (ok if st == "ok" else other).append(m)
-            ranked = ok + other
+                if st == "ok" and need_json and not self.registry.is_json_capable(m):
+                    last.append(m)   # format= calls prefer json-capable models
+                elif st == "ok":
+                    ok.append(m)
+                else:
+                    other.append(m)
+            ranked = ok + other + last
             if not ranked:
                 return []  # all pruned: chat() decides park vs failure
             chain = ranked
@@ -196,7 +201,7 @@ class Router:
         if tools:
             format = None  # §19.10: never combine format with tools
         chain = self.chain_for(role, exclude, need_tools=bool(tools),
-                               model_hint=hint)
+                               model_hint=hint, need_json=bool(format))
         errors = []
         all_paid = True
         if not chain:

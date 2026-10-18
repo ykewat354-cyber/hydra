@@ -225,7 +225,9 @@ class OllamaCloud:
             while True:
                 self._check_cancel()
                 try:
-                    line = resp.fp.readline()
+                    # resp.readline() de-chunks HTTP/1.1 bodies; reading resp.fp
+                    # directly would feed chunk-size lines into the NDJSON parser.
+                    line = resp.readline()
                 except (socket.timeout, TimeoutError) as exc:
                     raise StreamStalled(
                         f"no bytes for {self.idle_timeout}s (network switch or stalled server)"
@@ -241,6 +243,8 @@ class OllamaCloud:
                     chunk = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(chunk, dict):
+                    continue  # ignore framing / keep-alive noise
                 msg = chunk.get("message") or {}
                 th = msg.get("thinking")
                 if th:
