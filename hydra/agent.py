@@ -264,10 +264,111 @@ class Agent:
         return int(len(blob) / 3.5)
 
     def maybe_compact(self, rt) -> bool:
-        return False  # real compaction lands with the context phase
+        """Compact at turn boundaries only, when the estimate crosses compact_at."""
+        limit = int(C.get(rt.cfg, "loop.working_ctx", 48000) or 48000)
+        at = float(C.get(rt.cfg, "loop.compact_at", 0.75) or 0.75)
+        if self.estimate_tokens() < int(limit * at):
+            return False
+        return self.compact(rt)
 
-    def compact(self, rt) -> bool:
-        return False
+    def _turn_groups(self) -> list:
+        """Group messages into turns: assistant + its tool results per group."""
+        groups, cur = [], []
+        for m in self.messages:
+            if m.get("role") == "assistant" and cur:
+                groups.append(cur)
+                cur = [m]
+            else:
+                cur.append(m)
+        if cur:
+            groups.append(cur)
+        return groups
+
+    def compact(self, rt, keep_last: int = 6) -> bool:
+        """Summarizer replaces the oldest turns with one state digest (§6)."""
+        groups = self._turn_groups()
+        if len(groups) <= keep_last + 1:
+            return False
+        old, keep = groups[:-keep_last], groups[-keep_last:]
+        old_msgs = [m for g in old for m in g]
+        before = self.estimate_tokens()
+        digest = self._summarize(rt, old_msgs)
+        self.messages = [{"role": "user", "content": digest}] + \
+            [m for g in keep for m in g]
+        if self.journal is not None:
+            self.journal.event("compact", self.id, retired=len(old_msgs),
+                               kept=len(self.messages) - 1,
+                               digest_chars=len(digest),
+                               est_before=before, est_after=self.estimate_tokens())
+        return True
+
+    def _summarize(self, rt, old_msgs: list) -> str:
+        """One summarizer call; never raises. Falls back to a mechanical digest."""
+        schema = ("GOAL · STATUS · DECISIONS · FILES (path — state) · "
+                  "COMMANDS (cmd → outcome) · FINDINGS · BLOCKERS · NEXT")
+        prompt = (
+            "Compress the conversation below into ONE state digest for a coding "
+            "agent that must continue the task. Use exactly this schema: " + schema +
+            ". Max ~900 tokens. Preserve exact paths, identifiers and error "
+            "strings. Do not include thinking text. Return only the digest.\n\n" +
+            self._digest_input(old_msgs))
+        text = ""
+        try:
+            reply = rt.router.chat([{"role": "user", "content": prompt}],
+                                   role="summarizer", think="off")
+            text = (reply.content or "").strip()
+        except Exception:
+            text = ""
+        if not text:
+            text = self._mechanical_digest(old_msgs)
+        return ("# State digest (compacted; older turns removed)\n"
+                + text[:3150])
+
+    @staticmethod
+    def _digest_input(msgs: list) -> str:
+        lines = []
+        for m in msgs:
+            role = m.get("role")
+            if role == "assistant":
+                parts = []
+                if m.get("content"):
+                    parts.append(str(m["content"])[:800])
+                for tc in (m.get("tool_calls") or []):
+                    fn = tc.get("function") or {}
+                    args = fn.get("arguments")
+                    if not isinstance(args, str):
+                        args = json.dumps(args or {}, sort_keys=True)
+                    parts.append(f"[call {fn.get('name')}({args[:300]})]")
+                lines.append("ASSISTANT: " + " ".join(parts)[:1500])
+            elif role == "tool":
+                lines.append(f"TOOL {m.get('tool_name', '')}: "
+                             + str(m.get("content") or "")[:1500])
+            else:
+                lines.append(f"{str(role).upper()}: "
+                             + str(m.get("content") or "")[:1500])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _mechanical_digest(msgs: list) -> str:
+        files, cmds = [], []
+        for m in msgs:
+            if m.get("role") != "assistant":
+                continue
+            for tc in (m.get("tool_calls") or []):
+                fn = tc.get("function") or {}
+                a = fn.get("arguments") or {}
+                if isinstance(a, str):
+                    try:
+                        a = json.loads(a)
+                    except Exception:
+                        a = {}
+                if fn.get("name") in ("write_file", "edit_file", "read_file") and a.get("path"):
+                    files.append(str(a["path"]))
+                if fn.get("name") == "bash" and a.get("cmd"):
+                    cmds.append(str(a["cmd"])[:100])
+        return ("compaction fallback (summarizer unavailable)\n"
+                "FILES: " + ", ".join(dict.fromkeys(files))[:800] + "\n"
+                "COMMANDS: " + "; ".join(cmds[-10:])[:800])
 
     # -------------------------------------------------- report
     def finish_from_text(self, text: str) -> None:
@@ -305,8 +406,18 @@ class Agent:
         worst = max(counts.values()) if counts else 0
         if worst >= repeat:
             self._stall_window.clear()
+            last = self.data.get("last_model")
+            escalated = None
+            if last and last not in self.exclude_models and len(self.exclude_models) < 3:
+                self.exclude_models.append(last)
+                escalated = last
             if self.journal is not None:
-                self.journal.event("stall", self.id, repeated=worst)
-            self.send("Change approach: the same action keeps repeating without new "
-                      "progress. Re-read the last output, use a different method, or "
-                      "call finish with what you have.")
+                self.journal.event("stall", self.id, repeated=worst, escalate=escalated)
+            msg = ("Change approach: the same action keeps repeating without new "
+                   "progress. ")
+            if escalated:
+                msg += (f"The model {last} made no progress; switching to another "
+                        f"model. ")
+            msg += ("Re-read the last output, use a different method, or call "
+                    "finish with what you have.")
+            self.send(msg)

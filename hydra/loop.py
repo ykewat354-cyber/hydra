@@ -51,6 +51,7 @@ def run_agent(agent, rt) -> dict:
                     calls = parsed
                     from_text = True
             agent.append(reply.as_message())
+            agent.data["last_model"] = getattr(reply, "model", None)
             if from_text and rt.journal:
                 rt.journal.event("parsed_from_text", agent.id, n=len(calls))
 
