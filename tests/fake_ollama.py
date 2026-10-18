@@ -102,6 +102,9 @@ class _Httpd(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address):
+        pass  # clients aborting mid-stream (SIGINT tests) are expected
+
 
 def _split(text: str, n: int) -> list:
     n = max(1, int(n))

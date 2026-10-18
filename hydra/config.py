@@ -216,6 +216,15 @@ def expand(value: str) -> Path:
     return Path(os.path.expandvars(str(value))).expanduser()
 
 
+def shell_path() -> str:
+    """Termux rule (§11): never hard-code /bin/sh — use $PREFIX/bin/bash."""
+    import shutil
+    cand = Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr")) / "bin" / "bash"
+    if cand.exists():
+        return str(cand)
+    return shutil.which("bash") or "sh"
+
+
 # ---------------------------------------------------------------- dict helpers
 
 def deep_merge(dst: dict, src: dict) -> dict:

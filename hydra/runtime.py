@@ -34,6 +34,9 @@ class Runtime:
             C.get(cfg, "api.host", "https://ollama.com"), key,
             C.get(cfg, "api.connect_timeout", 15) or 15,
             C.get(cfg, "api.idle_timeout", 90) or 90)
+        self.sigint = threading.Event()   # first Ctrl-C: cancel, keep the run alive
+        self.client.cancel_event = self.sigint
+        self._child_env: dict = {}
         self.gate = LLMGate(C.max_inflight(cfg))
         self.registry = ModelRegistry(cfg)
         self.router = Router(cfg, self.client, self.prices, gate=self.gate,
@@ -114,7 +117,7 @@ class Runtime:
         self.journal = J.Journal(self.run_id, self.cfg, sink=self.ui.event,
                                  redact=self.redact)
         self.router.journal = self.journal
-        self.env_block = build_env_block(self.cwd)
+        self.env_block = build_env_block(self.cwd, self.cfg, role="lead")
         if lead_model:
             chain = list(C.get(self.cfg, "roles.lead.chain") or [])
             self.cfg.setdefault("roles", {}).setdefault("lead", {})["chain"] = \
@@ -148,7 +151,7 @@ class Runtime:
                                  redact=self.redact, seq0=len(events))
         self.router.journal = self.journal
         self.cwd = Path(data.get("cwd") or self.cwd)
-        self.env_block = build_env_block(self.cwd)
+        self.env_block = build_env_block(self.cwd, self.cfg, role="lead")
         lead = Agent("a0", "lead", data.get("task", ""), self.cfg, workdir=self.cwd,
                      system_prompt=load_system_prompt("lead"),
                      env_block=self.env_block)
@@ -192,6 +195,7 @@ class Runtime:
             self.ui.info("Fix: echo 'export OLLAMA_API_KEY=your_key' >> ~/.bashrc && source ~/.bashrc")
             self.ui.info("  or: mkdir -p ~/.hydra && echo your_key > ~/.hydra/key && chmod 600 ~/.hydra/key")
             self.ui.info(f"({exc})")
+            self._hook("error", lead, f"{type(exc).__name__}: {exc}")
             return 1, (lead.report or {})
         except AllModelsFailed as exc:
             parked = bool(getattr(exc, "all_paid", False))
@@ -202,12 +206,19 @@ class Runtime:
                 self.ui.info("Re-run after your monthly reset:  hydra resume")
                 if C.get(self.cfg, "termux.notify_on_park", True):
                     self.notify("HYDRA parked", "Credits likely exhausted. hydra resume")
+                self._hook("park", lead, str(exc))
             else:
                 self.ui.info(f"\nAll models failed: {exc}")
+                self._hook("error", lead, f"{type(exc).__name__}: {exc}")
             return (75 if parked else 1), (lead.report or {})
         except KeyboardInterrupt:
             self.run_meta.update({"status": "interrupted", "exit_code": 130})
             return 130, (lead.report or {})
+        except Exception as exc:
+            self.run_meta.update({"status": "failed", "exit_code": 1})
+            self.ui.info(f"\nrun failed: {type(exc).__name__}: {exc}")
+            self._hook("error", lead, f"{type(exc).__name__}: {exc}")
+            return 1, (lead.report or {})
         finally:
             self.run_meta["finished"] = time.time()
             if self.journal:
@@ -215,6 +226,24 @@ class Runtime:
             if (self.run_meta.get("status") in ("done", "partial")
                     and C.get(self.cfg, "termux.notify_on_finish", True)):
                 self.notify("HYDRA done", str((lead.report or {}).get("summary", ""))[:160])
+
+    def _hook(self, event: str, agent, preview: str = "") -> None:
+        try:
+            from .hooks import run_hook
+            run_hook(self, event, agent, result_preview=preview)
+        except Exception:
+            pass
+
+    def child_env(self, role: str) -> str:
+        """Env block for a sub-agent: same text, project part capped (§19.1)."""
+        role = str(role or "worker")
+        if role not in self._child_env:
+            full = str(C.get(self.cfg, f"roles.{role}.project", "")) == "full"
+            cap = None if full else int(
+                C.get(self.cfg, "project.subagent_chars", 2000) or 2000)
+            self._child_env[role] = build_env_block(self.cwd, self.cfg, role=role,
+                                                    project_cap=cap)
+        return self._child_env[role]
 
     def run(self, task: str, name: str = None, lead_model: str = None):
         lead = self.start_run(task, name=name, lead_model=lead_model)

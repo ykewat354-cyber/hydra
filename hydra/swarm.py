@@ -66,7 +66,7 @@ class Swarm:
         agent = Agent(aid, str(role or "worker"), task_full, cfg, depth=depth,
                       parent_id=parent.id, workdir=parent.workdir,
                       system_prompt=load_system_prompt("subagent", role),
-                      env_block=parent.env_block or self.rt.env_block or "",
+                      env_block=self.rt.child_env(role),
                       tool_names=(tools if tools is not None else "role"),
                       think=think, model=model)
         self._setup(agent)
@@ -291,7 +291,7 @@ class Swarm:
                           parent_id=meta.get("parent") or "a0",
                           workdir=parent.workdir if parent else rt.cwd,
                           system_prompt=load_system_prompt("subagent", role),
-                          env_block=rt.env_block or "",
+                          env_block=rt.child_env(role),
                           tool_names=meta.get("tools") or "role",
                           model=meta.get("model") or None)
             agent.messages = msgs

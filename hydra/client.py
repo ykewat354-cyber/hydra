@@ -86,6 +86,10 @@ class StreamStalled(Exception):
     """The stream stopped delivering bytes (network switch, kill, reset)."""
 
 
+class CallCancelled(Exception):
+    """The user pressed Ctrl-C: cancel this in-flight call, keep the run alive."""
+
+
 class EmptyReply(Exception):
     """200 with no content, no thinking and no tool calls."""
 
@@ -123,6 +127,7 @@ class OllamaCloud:
         self.key = key or ""
         self.connect_timeout = float(connect_timeout)
         self.idle_timeout = float(idle_timeout)
+        self.cancel_event = None  # set by Runtime: a threading.Event (SIGINT)
 
     # -------------------------------------------------- plumbing
     def _connect(self):
@@ -163,6 +168,7 @@ class OllamaCloud:
     # -------------------------------------------------- chat
     def chat(self, model: str, messages: list, tools=None, think=None,
              options=None, stream: bool = True, on_delta=None) -> Reply:
+        self._check_cancel()
         payload = {"model": model, "messages": messages, "stream": bool(stream)}
         if tools:
             payload["tools"] = tools
@@ -210,6 +216,7 @@ class OllamaCloud:
             reply = Reply(model=model)
             done = False
             while True:
+                self._check_cancel()
                 try:
                     line = resp.fp.readline()
                 except (socket.timeout, TimeoutError) as exc:
@@ -257,6 +264,11 @@ class OllamaCloud:
                 conn.close()
             except Exception:
                 pass
+
+    def _check_cancel(self) -> None:
+        ev = self.cancel_event
+        if ev is not None and ev.is_set():
+            raise CallCancelled("cancelled by the user (Ctrl-C)")
 
     # -------------------------------------------------- other endpoints
     def tags(self) -> list:

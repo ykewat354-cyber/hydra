@@ -90,7 +90,7 @@ def _battery_line() -> str:
     return text
 
 
-def build_env_block(cwd) -> str:
+def build_env_block(cwd, cfg=None, role: str = None, project_cap: int = None) -> str:
     lines = ["# Environment (fixed for this run)"]
     lines.append(f"date: {time.strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"machine: {platform.machine()} / {platform.system()}")
@@ -108,6 +108,18 @@ def build_env_block(cwd) -> str:
     bat = _battery_line()
     if bat:
         lines.append(bat)
+    if cfg is not None:
+        from . import config as C
+        from .project import project_text, skills_listing
+        cap = project_cap
+        if cap is None:
+            cap = int(C.get(cfg, "project.max_chars", 8000) or 8000)
+        text = project_text(cwd, cap)
+        if text.strip():
+            lines.append("\n# Project instructions (HYDRA.md)\n" + text)
+        sk = skills_listing(cwd, role=role)
+        if sk.strip():
+            lines.append("\n# Skills (call skill(name) to load its full instructions)\n" + sk)
     return "\n".join(lines)
 
 

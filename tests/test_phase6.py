@@ -62,7 +62,8 @@ def _wait_run(home, timeout=45):
                     except Exception:
                         d = {}
                     if d.get("status") in ("done", "partial", "failed",
-                                           "parked", "killed"):
+                                           "parked", "killed", "interrupted",
+                                           "auth-error"):
                         return last, d
         time.sleep(0.2)
     return last, None

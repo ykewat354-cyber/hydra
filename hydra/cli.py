@@ -22,6 +22,7 @@ from pathlib import Path
 from . import __version__
 from . import config as C
 from . import journal as J
+from .client import CallCancelled
 
 COMMANDS = {"run", "resume", "ls", "tail", "tree", "usage", "doctor", "kill",
             "models", "undo", "init", "map", "eval", "daemon", "schedule",
@@ -42,6 +43,7 @@ commands:
   usage [RUN]           token ledger + cost estimate (all runs if omitted)
   models probe|ls|pin   discover models your key can use
   daemon [--once]       run *.md task files dropped in ~/.hydra/queue/
+  schedule add|ls|rm    periodic jobs fired by the daemon
   doctor                environment checks
   kill RUN              stop a run
 
@@ -50,6 +52,7 @@ flags:
   --lead MODEL          pin the lead model
   --name NAME           name this run
   --max-inflight N      LLM gate slots
+  --continue            resume the last run started in this cwd
   --quiet  --json  --wait-reset
 """
 
@@ -57,9 +60,14 @@ REPL_HELP = """repl commands (all non-blocking, none is an approval):
   /tree            agent tree + status
   /kill aN         stop an agent (subtree included)
   /model [role=]m  pin a model first for a role (default lead)
+  /models          role chains and registry status
+  /cost            tokens + cost estimate so far
+  /compact         force context compaction now
+  /plan            tell the lead to plan (todos) before acting
   /pause /resume   pause between turns
   /note text       write to the shared blackboard
   /quit            leave the REPL (run keeps its state)
+  /<name> [args]   run a custom command from ~/.hydra/commands/<name>.md
   anything else    goes to the lead's inbox at its next turn
 """
 
@@ -144,6 +152,8 @@ def main(argv=None) -> int:
 
     if o.interactive:
         return cmd_repl(cfg, o)
+    if o.continue_:
+        return cmd_resume(cfg, [], o)
     if rest and rest[0] == "version":
         print(f"hydra {__version__}")
         return 0
@@ -175,7 +185,11 @@ def main(argv=None) -> int:
         return cmd_resume(cfg, rest[1:], o)
     if cmd == "daemon":
         return cmd_daemon(cfg, rest[1:])
-    if cmd in ("undo", "init", "map", "eval", "schedule"):
+    if cmd == "schedule":
+        return cmd_schedule(cfg, rest[1:])
+    if cmd == "init":
+        return cmd_init(cfg, o)
+    if cmd in ("undo", "map", "eval"):
         print(f"hydra: '{cmd}' arrives with a later build phase.")
         return 2
 
@@ -183,6 +197,16 @@ def main(argv=None) -> int:
     if not task.strip():
         print(HELP)
         return 0
+    if task.startswith("/"):
+        from .project import find_commands, render_command
+        head, _, args = task[1:].partition(" ")
+        cmds = find_commands(os.getcwd())
+        if head in cmds:
+            task = render_command(cmds[head], args.strip())
+        else:
+            print(f"hydra: unknown command /{head} — "
+                  f"available: {', '.join('/' + c for c in sorted(cmds)) or '(none)'}")
+            return 2
     return cmd_run(cfg, task, o)
 
 
@@ -194,14 +218,100 @@ def cmd_run(cfg, task, o) -> int:
     from .runtime import Runtime
     rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
     rt.wake_lock()
+    restore = _install_signals(rt)
     code, report = 1, {}
     try:
         code, report = rt.run(task, name=o.name, lead_model=o.lead)
+    except CallCancelled:
+        # pressed outside the agent loop: there is nothing left to keep alive
+        rt.run_meta.update({"status": "interrupted", "exit_code": 130})
+        try:
+            rt.journal.checkpoint(rt.run_meta)
+        except Exception:
+            pass
+        code, report = 130, {"status": "interrupted",
+                             "summary": "cancelled by user (Ctrl-C)"}
+    except KeyboardInterrupt:
+        rt.run_meta.update({"status": "interrupted", "exit_code": 130})
+        try:
+            rt.journal.checkpoint(rt.run_meta)
+        except Exception:
+            pass
+        print("\ninterrupted — checkpoint saved; `hydra resume` continues")
+        code, report = 130, {"status": "interrupted",
+                             "summary": "cancelled by user (Ctrl-C)"}
     finally:
+        restore()
         rt.wake_unlock()
         _footer(rt, report, code)
         rt.close()
     return code
+
+
+def _install_signals(rt):
+    """Ctrl-C (§19.8): first press cancels the in-flight call/tool and the run
+    stays alive; a second press within 2 s checkpoints and exits (code 130).
+    SIGTERM = checkpoint + exit. SIGHUP = checkpoint, keep running if detached."""
+    prev = {}
+    state = {"last": 0.0}
+
+    def first_or_exit(signum, frame):
+        now = time.monotonic()
+        if now - state["last"] <= 2.0:
+            raise KeyboardInterrupt
+        state["last"] = now
+        rt.sigint.set()
+        print("\n[cancelling the in-flight work — press again within 2s to stop]",
+              flush=True)
+        raise CallCancelled("Ctrl-C")
+
+    def on_term(signum, frame):
+        rt.sigint.set()  # let in-flight tools kill their process groups
+        raise KeyboardInterrupt
+
+    def on_hup(signum, frame):
+        try:
+            rt.journal.checkpoint(rt.run_meta)
+        except Exception:
+            pass
+        if os.environ.get("HYDRA_DETACHED") != "1":
+            raise KeyboardInterrupt
+
+    for sig, handler in ((signal.SIGINT, first_or_exit),
+                         (signal.SIGTERM, on_term),
+                         (signal.SIGHUP, on_hup)):
+        try:
+            prev[sig] = signal.getsignal(sig)
+            signal.signal(sig, handler)
+        except Exception:
+            pass
+
+    def restore():
+        for sig, handler in prev.items():
+            try:
+                signal.signal(sig, handler)
+            except Exception:
+                pass
+
+    return restore
+
+
+INIT_TASK = """Explore this repository and write a HYDRA.md file for it at the \
+repo root for future agents.
+
+Include, briefly and concretely:
+- what this project does and how it is laid out (key files/dirs)
+- exact build / test / run commands
+- conventions, gotchas and do-not-touch areas a fresh agent must know
+
+Start an empty HYDRA.md, inspect the repo with ls/glob/grep/read_file, then \
+write it (under ~150 lines). End with finish(status=\"done\", summary=...)."""
+
+
+def cmd_init(cfg, o) -> int:
+    """`hydra init` (§19.1): the lead explores the repo and writes HYDRA.md."""
+    print("exploring this repo and writing HYDRA.md…")
+    return cmd_run(cfg, INIT_TASK, o)
 
 
 def _spawn_detached(cfg, task, o) -> int:
@@ -227,6 +337,7 @@ def _spawn_detached(cfg, task, o) -> int:
         args += ["--wait-reset"]
     cmd = [sys.executable, "-m", "hydra"] + args + [task]
     env = dict(os.environ)
+    env["HYDRA_DETACHED"] = "1"
     root = str(Path(__file__).resolve().parents[1])
     have = env.get("PYTHONPATH", "").split(os.pathsep) if env.get("PYTHONPATH") else []
     if root not in have:
@@ -235,6 +346,7 @@ def _spawn_detached(cfg, task, o) -> int:
         import shlex
         name = f"hydra_{stamp}"
         inner = ("termux-wake-lock 2>/dev/null; "
+                 "HYDRA_DETACHED=1 "
                  + " ".join(shlex.quote(a) for a in cmd)
                  + f" 2>&1 | tee -a {shlex.quote(str(log))}; "
                    "termux-wake-unlock 2>/dev/null")
@@ -304,6 +416,7 @@ def cmd_repl(cfg, o) -> int:
     from .runtime import Runtime
     rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
     rt.wake_lock()
+    restore = _install_signals(rt)
     code, report = 1, {}
     try:
         if not o.quiet:
@@ -330,43 +443,55 @@ def cmd_repl(cfg, o) -> int:
         th.start()
         import select
         pending = []  # steers typed before the lead agent exists
-        while th.is_alive():
-            lead = rt.agents.get("a0")
-            if lead is not None and pending:  # deliver as soon as it shows up
-                for m in pending:
-                    lead.send(m)
-                pending.clear()
-                print("→ steered")
-            try:
-                ready, _, _ = select.select([sys.stdin], [], [], 0.25)
-            except Exception:
-                ready = []
-            if not ready:
-                continue
-            line = sys.stdin.readline()
-            if line == "":  # stdin closed — the run continues to the end
-                break
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("/"):
-                if not _repl_cmd(rt, line):
+        try:
+            while th.is_alive():
+                lead = rt.agents.get("a0")
+                if lead is not None and pending:  # deliver as soon as it shows up
+                    for m in pending:
+                        lead.send(m)
+                    pending.clear()
+                    print("→ steered")
+                try:
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.25)
+                except CallCancelled:
+                    print("(cancelling the in-flight work…)")
+                    continue
+                except Exception:
+                    ready = []
+                if not ready:
+                    continue
+                line = sys.stdin.readline()
+                if line == "":  # stdin closed — the run continues to the end
                     break
-            else:
-                pending.append(line)
-                if rt.agents.get("a0") is None:
-                    print("→ queued (the run is still starting)")
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("/"):
+                    if not _repl_cmd(rt, line, pending):
+                        break
+                else:
+                    pending.append(line)
+                    if rt.agents.get("a0") is None:
+                        print("→ queued (the run is still starting)")
+        except KeyboardInterrupt:
+            for a in list(rt.agents.values()):
+                a.cancelled.set()
+            print("\ninterrupted — checkpoint saved; `hydra resume` continues")
+            code = 130
+            report = {"status": "interrupted", "summary": "cancelled by user (Ctrl-C)"}
         th.join(timeout=15)
-        code = box.get("code", 1)
-        report = box.get("report", {})
+        if code != 130:
+            code = box.get("code", 1)
+            report = box.get("report", {})
     finally:
+        restore()
         rt.wake_unlock()
         _footer(rt, report, code)
         rt.close()
     return code
 
 
-def _repl_cmd(rt, line) -> bool:
+def _repl_cmd(rt, line, pending=None) -> bool:
     """Handle one /command. Returns False to leave the REPL loop."""
     parts = line.split(None, 1)
     cmd = parts[0]
@@ -395,6 +520,44 @@ def _repl_cmd(rt, line) -> bool:
             C.set_path(rt.cfg, f"roles.{role}.chain",
                        [model] + [m for m in base if m != model])
             print(f"{role} chain: {model} first")
+    elif cmd == "/models":
+        for role in ("lead", "worker", "researcher", "critic", "summarizer",
+                     "reviewer", "vision"):
+            chain = C.get(rt.cfg, f"roles.{role}.chain") or []
+            print(f"{role:<10} " + " → ".join(str(m) for m in chain))
+        reg = getattr(rt, "registry", None)
+        if reg is not None:
+            try:
+                for m in reg.list_all():
+                    print(f"  {m.get('name'):<24} {m.get('status', '?')}")
+            except Exception:
+                pass
+    elif cmd == "/cost":
+        tot = rt.usage_totals()
+        print(f"{tot['in']} in / {tot['out']} out · {tot['calls']} calls · "
+              f"est ${tot['est_usd']:.4f}")
+    elif cmd == "/compact":
+        lead = rt.agents.get("a0")
+        if lead is None:
+            print("no lead yet")
+        else:
+            ok = False
+            try:
+                ok = bool(lead.compact(rt))
+            except Exception as exc:
+                print(f"compact failed: {exc}")
+            print("compacted" if ok else "nothing to compact yet")
+    elif cmd == "/plan":
+        lead = rt.agents.get("a0")
+        msg = ("PLAN FIRST: before any further tool action, emit your plan as a "
+               "todo list (todo tool), then execute it step by step.")
+        if lead is not None:
+            lead.nudge(msg)
+            print("plan requested from the lead")
+        else:
+            if pending is not None:
+                pending.append(msg)
+            print("plan requested (queued until the run starts)")
     elif cmd == "/pause":
         rt.paused.set()
         print("paused between turns — /resume to continue")
@@ -410,7 +573,22 @@ def _repl_cmd(rt, line) -> bool:
     elif cmd in ("/help", "/?"):
         print(REPL_HELP)
     else:
-        print(f"unknown command {cmd} — /help")
+        from .project import find_commands, render_command
+        cmds = find_commands(getattr(rt, "cwd", os.getcwd()))
+        head = cmd.lstrip("/")
+        if head in cmds:
+            rendered = render_command(cmds[head], arg)
+            lead = rt.agents.get("a0")
+            if lead is not None:
+                lead.send(rendered)
+                print(f"→ /{head} sent")
+            elif pending is not None:
+                pending.append(rendered)
+                print(f"→ /{head} queued (the run is still starting)")
+            else:
+                print(f"/{head}: no run to send it to")
+        else:
+            print(f"unknown command {cmd} — /help")
     return True
 
 
@@ -499,6 +677,36 @@ def cmd_daemon(cfg, args) -> int:
                     pass
                 print(f"[daemon] {p.name} -> {out.name} "
                       f"({(report or {}).get('status') or '?'}, exit {code})")
+            # scheduled jobs (§19.8): fired by the same daemon timer
+            try:
+                from . import schedule as S
+                for job in S.load_jobs():
+                    if stop.is_set():
+                        break
+                    if not S.is_due(job):
+                        continue
+                    jid = str(job.get("id"))
+                    ts = time.strftime("%m%d_%H%M%S")
+                    task = str(job.get("task") or "")
+                    print(f"[daemon] schedule {jid}: {_shorten(task, 50)}")
+                    code, report = 1, {}
+                    rt = None
+                    try:
+                        rt = Runtime(cfg, quiet=True)
+                        rt.wake_lock()
+                        code, report = rt.run(task, name=f"sched-{jid}-{ts}")
+                    except Exception as exc:
+                        report = {"status": "failed",
+                                  "summary": f"{type(exc).__name__}: {exc}"}
+                    finally:
+                        if rt is not None:
+                            rt.wake_unlock()
+                            rt.close()
+                    S.mark_fired(jid)
+                    print(f"[daemon] schedule {jid} done "
+                          f"({(report or {}).get('status') or '?'}, exit {code})")
+            except Exception as exc:
+                print(f"[daemon] schedule error: {exc}")
             if once:
                 break
             deadline = time.time() + poll
@@ -512,6 +720,50 @@ def cmd_daemon(cfg, args) -> int:
                 pass
     print("hydra daemon: stopped")
     return 0
+
+
+# ------------------------------------------------------------------ schedule
+
+def cmd_schedule(cfg, args) -> int:
+    from . import schedule as S
+    sub = (args[0] if args else "ls").lower()
+    if sub in ("ls", "list"):
+        jobs = S.load_jobs()
+        if not jobs:
+            print("no schedule entries — hydra schedule add \"every 30m\" \"<task>\"")
+            return 0
+        now = time.time()
+        for j in jobs:
+            last = float(j.get("last") or 0.0)
+            ago = f"{int((now - last) // 60)}m ago" if last else "never"
+            print(f"{str(j.get('id')):<10} {str(j.get('when')):<14} "
+                  f"last={ago:<10} {_shorten(j.get('task'), 60)}")
+        print("fired by `hydra daemon`; `hydra schedule export` hands them to "
+              "termux-job-scheduler (Android minimum 15 min)")
+        return 0
+    if sub == "add":
+        if len(args) < 3:
+            print("usage: hydra schedule add \"every 30m\" \"<task>\"")
+            return 2
+        try:
+            jid = S.add(args[1], " ".join(args[2:]))
+        except ValueError as exc:
+            print(f"hydra: {exc}")
+            return 2
+        print(f"schedule {jid}: {args[1]} -> {' '.join(args[2:])}")
+        return 0
+    if sub in ("rm", "del", "remove"):
+        if len(args) < 2:
+            print("usage: hydra schedule rm <id>")
+            return 2
+        ok = S.remove(args[1])
+        print("removed" if ok else f"no such job: {args[1]}")
+        return 0 if ok else 2
+    if sub == "export":
+        print(S.export_termux())
+        return 0
+    print("usage: hydra schedule add|ls|rm|export")
+    return 2
 
 
 # ------------------------------------------------------------------ inspect

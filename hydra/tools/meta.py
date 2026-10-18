@@ -155,6 +155,26 @@ def _tool_agent_result(args, ctx):
     return swarm.format_report(str(args["id"]))
 
 
+# ------------------------------------------------------ skills (§19.2)
+
+def _tool_skill(args, ctx):
+    from ..project import find_skills
+    skills = find_skills(ctx.agent.workdir)
+    name = str(args.get("name") or "").strip()
+    if not name:
+        if not skills:
+            return "no skills installed (~/.hydra/skills/<name>/SKILL.md)"
+        return ("usage: skill(name). Available:\n"
+                + "\n".join(f"- {n} — {s['description']}" if s["description"] else f"- {n}"
+                            for n, s in sorted(skills.items())))
+    s = skills.get(name)
+    if s is None:
+        avail = ", ".join(sorted(skills)) or "(none)"
+        return f"ERROR: unknown skill '{name}'. Available: {avail}"
+    body = s["body"] or "(empty skill)"
+    return f"{body}\n\n[skill dir: {s['dir']}]"
+
+
 # ------------------------------------------------------ multi-model (§7.5)
 
 def _tool_ask_models(args, ctx):
@@ -296,3 +316,10 @@ def register(reg) -> None:
             "rounds": {"type": "integer", "description": "critic only (default 2)."}},
          "required": ["prompt"]},
         _tool_ask_models, group="core"))
+    reg.register(Tool(
+        "skill",
+        "Load a skill's full SKILL.md instructions by name. Skills are listed "
+        "with one-line descriptions in the env block.",
+        {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Skill name (omit to list)."}}},
+        _tool_skill))

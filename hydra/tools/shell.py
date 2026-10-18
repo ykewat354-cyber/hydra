@@ -52,22 +52,43 @@ def run_shell(rt, cwd, cmd: str, timeout: float, stdin_text=None) -> str:
             start_new_session=True)
     except Exception as exc:
         return f"ERROR: could not start shell: {exc}"
-    try:
-        out, _ = proc.communicate(
-            input=(stdin_text.encode() if stdin_text is not None else None),
-            timeout=float(timeout))
-        text = out.decode("utf-8", "replace")
-        if proc.returncode not in (0, None):
-            text += f"\n[exit {proc.returncode}]"
-        return text
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
+    end = time.time() + float(timeout)
+    input_bytes = stdin_text.encode() if stdin_text is not None else None
+    cancelled = False
+    out = b""
+    while True:
+        slice_s = max(0.05, min(0.4, end - time.time()))
         try:
-            out, _ = proc.communicate(timeout=5)
-        except Exception:
-            out = b""
-        return out.decode("utf-8", "replace") + \
-            f"\n[timeout after {timeout}s — process group killed]"
+            out, _ = proc.communicate(input=input_bytes, timeout=slice_s)
+            input_bytes = None
+            break
+        except subprocess.TimeoutExpired:
+            input_bytes = None
+            if rt is not None and getattr(rt, "sigint", None) is not None \
+                    and rt.sigint.is_set():
+                cancelled = True
+                _kill_group(proc)
+            elif time.time() >= end:
+                _kill_group(proc)
+                try:
+                    out, _ = proc.communicate(timeout=5)
+                except Exception:
+                    out = b""
+                text = out.decode("utf-8", "replace")
+                return text + f"\n[timeout after {timeout}s — process group killed]"
+            else:
+                continue
+            try:
+                out, _ = proc.communicate(timeout=5)
+            except Exception:
+                out = b""
+            break
+    text = out.decode("utf-8", "replace")
+    if cancelled:
+        return text + "\n[interrupted by Ctrl-C — process group killed]"
+    if proc.returncode not in (0, None):
+        text += f"\n[exit {proc.returncode}]"
+    return text
 
 
 def _tool_bash(args, ctx) -> str:

@@ -179,12 +179,27 @@ class Executor:
             names = ", ".join(sorted(self.rt.tools.tools.keys()))
             return f"ERROR: unknown tool '{name}'. Available tools: {names}"
         ctx = ToolContext(self.rt, agent, {"name": name, "arguments": args})
+        pre = ""
+        try:
+            from ..hooks import run_hook
+            pre = run_hook(self.rt, "pre_tool", agent, tool=name, args=args)
+        except Exception:
+            pre = ""
         try:
             out = tool.fn(args or {}, ctx)
-            return out if isinstance(out, str) else str(out)
+            out = out if isinstance(out, str) else str(out)
         except Exception as exc:
             tb = traceback.format_exc(limit=3)
-            return f"ERROR: {type(exc).__name__}: {exc}\n{tb[-600:]}"
+            out = f"ERROR: {type(exc).__name__}: {exc}\n{tb[-600:]}"
+        try:
+            from ..hooks import run_hook
+            note = run_hook(self.rt, "post_tool", agent, tool=name, args=args,
+                            result_preview=out)
+            if note:
+                out = out + "\n[hook] " + note
+        except Exception:
+            pass
+        return out
 
     def _cap(self, text: str, agent, name: str) -> str:
         text = text if isinstance(text, str) else str(text)
