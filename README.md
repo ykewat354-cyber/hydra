@@ -10,7 +10,16 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: specification.** This README is the build contract. Hand it to your AI coder and implement the phases in [§17](#17-build-plan-for-the-implementing-ai) in order.
+> **Status: implemented (v1.1).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 82 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits.
+
+### Install (one line)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ykewat354-cyber/hydra/main/install-remote.sh | bash
+```
+
+That clones/updates `~/hydra`, installs `$PREFIX/bin/hydra`, and runs `hydra doctor`.
+Then: `hydra models probe` → `hydra "your task"`.
 
 **Contents:** [1 Hard constraints](#1-hard-constraints) · [2 Free-tier reality check](#2-free-tier-reality-check) · [3 Architecture](#3-architecture) · [4 Install](#4-install-termux) · [5 Agent loop](#5-the-agent-loop) · [6 Token economy](#6-context--token-economy) · [7 Models](#7-models--multi-model-calling) · [8 LLM gate](#8-the-llm-gate) · [9 Sub-agents](#9-sub-agents) · [10 Tools](#10-tools) · [11 Termux](#11-termux-integration) · [12 State & resume](#12-state-journal--resume) · [13 CLI](#13-cli) · [14 Config](#14-config) · [15 Prompts](#15-prompts) · [16 Troubleshooting](#16-troubleshooting) · [17 Build plan](#17-build-plan-for-the-implementing-ai) · [18 Non-goals](#18-non-goals) · [19 Extended features](#19-extended-features-v11)
 
