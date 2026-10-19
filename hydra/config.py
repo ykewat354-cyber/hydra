@@ -88,6 +88,7 @@ DEFAULTS: dict = {
         },
     },
     "hooks": {
+        "timeout": 30,
         "pre_tool": "", "post_tool": "", "post_edit": "",
         "agent_done": "", "finish": "", "park": "", "error": "",
     },
@@ -183,6 +184,7 @@ timeout = 60
 "*.sh" = "bash -n {file}"
 
 [hooks]
+timeout   = 30
 pre_tool  = ""
 post_tool = ""
 post_edit = ""

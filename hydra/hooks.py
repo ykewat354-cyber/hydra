@@ -20,11 +20,13 @@ EDIT_TOOLS = ("write_file", "edit_file", "apply_patch")
 
 
 def run_hook(rt, event: str, agent=None, tool=None, args=None,
-             result_preview=None, timeout: float = 30) -> str:
+             result_preview=None, timeout: float = None) -> str:
     """Run the configured hook for ``event``. Never raises; returns stdout tail."""
     cmd = C.get(rt.cfg, f"hooks.{event}", "") if rt is not None else ""
     if not cmd:
         return ""
+    if timeout is None:
+        timeout = float(C.get(rt.cfg, "hooks.timeout", 30) or 30)
     payload = {
         "event": event,
         "run": getattr(rt, "run_id", None),
