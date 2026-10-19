@@ -48,6 +48,15 @@ def run_agent(agent, rt) -> dict:
                     agent.set_report("partial", f"Turn cap reached ({max_turns}).")
                     break
                 agent.turns += 1
+                if agent.turns == 1:
+                    # §19.9: capture the pre-run tree as turn 0 so the whole
+                    # run can be undone, not just its last turn. Root agent
+                    # only; a no-op when journal.git_snapshots is off.
+                    try:
+                        from . import snapshots
+                        snapshots.turn_snapshot(rt, agent, force=True, turn=0)
+                    except Exception:
+                        pass
 
                 try:
                     cb = getattr(rt.ui, "delta", None)
@@ -109,6 +118,13 @@ def run_agent(agent, rt) -> dict:
                     rt.sigint.clear()  # an interrupted tool was killed; back to normal
                 agent.append_tool_results(results)
 
+                # §19.9: snapshot after every turn with tree changes, including
+                # the turn that finishes the run.
+                try:
+                    from . import snapshots
+                    snapshots.turn_snapshot(rt, agent)  # root agent only
+                except Exception:
+                    pass
                 if agent.finished:
                     # independent verification (§5.3): a failed review puts the
                     # agent back in the loop with the issues injected as steering
@@ -116,11 +132,6 @@ def run_agent(agent, rt) -> dict:
                         continue
                     break
                 agent.stall_check(rt, calls, results)
-                try:
-                    from . import snapshots
-                    snapshots.turn_snapshot(rt, agent)  # §19.9, root agent only
-                except Exception:
-                    pass
                 if rt.journal:
                     rt.journal.turn_boundary()
             except CallCancelled as exc:

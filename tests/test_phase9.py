@@ -452,7 +452,7 @@ class SnapshotTests(unittest.TestCase):
             self.assertIn("refs/hydra/r1/1", refs)
             self.assertIn("refs/hydra/r1/2", refs)
 
-            # default: the previous turn
+            # default: the run's baseline (first) snapshot
             info = snapshots.plan(root, "r1")
             self.assertTrue(info["ok"], info)
             self.assertEqual(info["turn"], 1)
@@ -476,6 +476,77 @@ class SnapshotTests(unittest.TestCase):
             self.assertTrue(res2.get("done"), res2)
             self.assertEqual((root / "keep.txt").read_text(encoding="utf-8"), "v2\n")
             self.assertEqual((root / "new.txt").read_text(encoding="utf-8"), "new\n")
+
+    def test_undo_default_restores_run_baseline(self):
+        """Regression: default undo must revert the whole run, not one turn."""
+        from hydra import snapshots
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.assertEqual(_git(root, "init", "-q").returncode, 0)
+            (root / "keep.txt").write_text("v1\n", encoding="utf-8")
+            (root / "a.txt").write_text("a1\n", encoding="utf-8")
+            snapshots.snapshot(root, "r2", 1)  # baseline, before the changes
+            (root / "a.txt").write_text("a2\n", encoding="utf-8")
+            (root / "b.txt").write_text("b1\n", encoding="utf-8")
+            snapshots.snapshot(root, "r2", 2)
+            (root / "c.txt").write_text("c1\n", encoding="utf-8")
+            snapshots.snapshot(root, "r2", 3)
+
+            info = snapshots.plan(root, "r2")
+            self.assertTrue(info["ok"], info)
+            self.assertEqual(info["turn"], 1)  # baseline, not the previous turn
+            self.assertIn("b.txt", info["remove"])
+            self.assertIn("c.txt", info["remove"])
+
+            res = snapshots.undo(root, "r2")
+            self.assertTrue(res.get("done"), res)
+            self.assertEqual((root / "a.txt").read_text(encoding="utf-8"), "a1\n")
+            self.assertFalse((root / "b.txt").exists())
+            self.assertFalse((root / "c.txt").exists())
+
+    def test_turn_snapshot_writes_turn_zero_baseline(self):
+        from hydra import snapshots
+
+        class _Agent:
+            id = "a0"
+
+            def __init__(self, workdir):
+                self.workdir = str(workdir)
+                self.turns = 1
+
+        class _RT:
+            def __init__(self):
+                self.cfg = {"journal": {"git_snapshots": True}}
+                self.run_id = "r3"
+                self.journal = None
+                self.agents = {}
+                self.ui = SimpleNamespace(info=lambda *a, **k: None)
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.assertEqual(_git(root, "init", "-q").returncode, 0)
+            (root / "x.txt").write_text("x1\n", encoding="utf-8")
+            _git(root, "add", "-A")
+            _git(root, "-c", "user.name=t", "-c", "user.email=t@t",
+                 "commit", "-qm", "base")
+            rt, agent = _RT(), _Agent(root)
+            rt.agents["a0"] = agent
+            self.assertTrue(snapshots.turn_snapshot(rt, agent, force=True, turn=0))
+            (root / "x.txt").write_text("x2\n", encoding="utf-8")
+            self.assertTrue(snapshots.turn_snapshot(rt, agent))  # end of turn 1
+
+            refs = _git(root, "for-each-ref", "refs/hydra/r3/").stdout
+            self.assertIn("refs/hydra/r3/0", refs)
+            self.assertIn("refs/hydra/r3/1", refs)
+            # default undo (with and without a run id) lands on the baseline
+            for run_id in (None, "r3"):
+                plan = snapshots.plan(root, run_id)
+                self.assertTrue(plan["ok"], plan)
+                self.assertEqual(plan["turn"], 0)
+            res = snapshots.undo(root, "r3")
+            self.assertTrue(res.get("done"), res)
+            self.assertEqual((root / "x.txt").read_text(encoding="utf-8"), "x1\n")
 
 
 # ---------------------------------------------------------------- evals §19.11

@@ -7,8 +7,10 @@ boundary where the tree changed, HYDRA writes a snapshot commit to
 ``update-ref``). The user's branch, HEAD, index and working tree are never
 touched. Untracked files are included; ignored files are not.
 
-``hydra undo`` restores the working tree from a snapshot and removes files
-that did not exist then. It is a user command; no agent ever waits on it.
+``hydra undo`` restores the working tree to the run's baseline snapshot
+(turn 0, written before the first model turn) and removes files that did not
+exist then; ``--to N`` picks a specific turn instead. It is a user command;
+no agent ever waits on it.
 """
 from __future__ import annotations
 
@@ -135,11 +137,12 @@ def snapshot(root, run_id: str, turn, cfg=None) -> str | None:
                 pass
 
 
-def turn_snapshot(rt, agent, force: bool = False) -> str | None:
+def turn_snapshot(rt, agent, force: bool = False, turn=None) -> str | None:
     """Called at turn boundaries: snapshot only when the tree changed.
 
     Only the root (lead) agent snapshots, so there is one series per run.
-    Never raises.
+    ``turn`` overrides the ref number (used for the turn-0 baseline). Never
+    raises.
     """
     try:
         if not rt.cfg.get("journal", {}).get("git_snapshots"):
@@ -160,11 +163,12 @@ def turn_snapshot(rt, agent, force: bool = False) -> str | None:
         if not force and last is not None and cur == last:
             return None
         rt._snap_last = cur
-        sha = snapshot(root, rt.run_id or "run", getattr(agent, "turns", 0), rt.cfg)
+        t = getattr(agent, "turns", 0) if turn is None else int(turn)
+        sha = snapshot(root, rt.run_id or "run", t, rt.cfg)
         if sha and rt.journal:
             try:
                 rt.journal.event("snapshot", getattr(agent, "id", None),
-                                 turn=getattr(agent, "turns", 0), sha=sha[:12])
+                                 turn=t, sha=sha[:12])
             except Exception:
                 pass
         return sha
@@ -236,8 +240,10 @@ def plan(root, run_id=None, to=None) -> dict:
             return {"ok": False, "note": f"run {run_id} has no turn {to} (turns: {avail})"}
         chosen = match[0]
     else:
-        # default: the previous turn (undo the last recorded change) when possible
-        chosen = turns[-2] if len(turns) >= 2 else turns[-1]
+        # default: the run's baseline — the tree before the run started
+        # (turn 0, written by the loop on the first turn). Older snapshot
+        # series predate the baseline ref, so fall back to their first ref.
+        chosen = turns[0]
     turn, sha = chosen
     snap = set(_snapshot_files(root, sha))
     work = set(_worktree_files(root))
