@@ -49,6 +49,8 @@ commands:
   report [RUN|--last]   paste-friendly run summary (--json --full --since 2h --timeline)
   usage [RUN]           token ledger + cost estimate (all runs if omitted)
   models probe|ls|pin   discover models your key can use
+  models bench          benchmark models on B1/B2/B3 -> ~/.hydra/scorecard.json
+  models tune [--apply] propose role chains from the scorecard
   daemon [--once]       run *.md task files dropped in ~/.hydra/queue/
   schedule add|ls|rm    periodic jobs fired by the daemon
   map [PATH] [BUDGET]   repo map: tree + top-level symbols (cached)

@@ -1,7 +1,8 @@
 """HYDRA configuration: defaults, layered TOML loading, paths, API key resolution.
 
 Layers (later wins):
-    built-in defaults  ->  ~/.hydra/config.toml  ->  <project>/.hydra/config.toml  ->  --set flags
+    built-in defaults  ->  ~/.hydra/roles.auto.toml  ->  ~/.hydra/config.toml
+    ->  <project>/.hydra/config.toml  ->  --set flags
 
 Only ``config.py`` (defaults) and ``models.json`` ever mention model names;
 the rest of the code treats them as configuration data.
@@ -114,7 +115,8 @@ DEFAULT_PRICES: dict = {
 CANDIDATE_MODELS: list = list(DEFAULT_PRICES)
 
 CONFIG_TEMPLATE = """# HYDRA config (all keys optional; these are the built-in defaults).
-# Layers: defaults -> this file -> <project>/.hydra/config.toml -> --set key=value
+# Layers: defaults -> ~/.hydra/roles.auto.toml -> this file
+#         -> <project>/.hydra/config.toml -> --set key=value
 
 [api]
 host            = "https://ollama.com"
@@ -293,6 +295,12 @@ def parse_overrides(items) -> list:
 
 def load_config(overrides=None, project_dir=None) -> dict:
     cfg = copy.deepcopy(DEFAULTS)
+    pauto = home() / "roles.auto.toml"
+    if pauto.is_file():
+        try:
+            deep_merge(cfg, tomllib.loads(pauto.read_text(encoding="utf-8")))
+        except Exception:
+            pass  # written by `hydra models tune --apply`; never brick startup
     gpath = home() / "config.toml"
     if gpath.is_file():
         try:

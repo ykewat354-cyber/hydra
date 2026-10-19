@@ -266,7 +266,13 @@ def cli(cfg: dict, args: list) -> int:
         return _cmd_ls(cfg)
     if sub == "pin":
         return _cmd_pin(cfg, args[1:])
-    print("usage: hydra models probe [--all] | ls | pin MODEL [--role ROLE]")
+    if sub in ("bench", "tune"):
+        from . import bench
+        return (bench.cli_bench(cfg, args[1:]) if sub == "bench"
+                else bench.cli_tune(cfg, args[1:]))
+    print("usage: hydra models probe [--all] | ls | pin MODEL [--role ROLE] "
+          "| bench [--models a,b] [--tasks B1,B2,B3] [--runs 1] [--max-usd 0.12] "
+          "| tune [--apply]")
     return 2
 
 
