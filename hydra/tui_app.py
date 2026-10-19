@@ -2305,10 +2305,10 @@ class App:
         import termios
         import tty
         self._old_term = termios.tcgetattr(0)
-        tty.setraw(0)
-        self._write("\x1b[?1049h\x1b[?25l\x1b[?2004h"
-                    "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h"
-                    "\x1b[2J\x1b[H")
+        # Install the signal handlers BEFORE any escape byte leaves the
+        # process: tests (and terminals) may react to seeing full-screen
+        # mode by signalling immediately, and that signal must not kill us
+        # with the tty left raw.
         for sig in (signal.SIGWINCH, signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             try:
                 self._old_sigs[sig] = signal.getsignal(sig)
@@ -2318,6 +2318,10 @@ class App:
                     signal.signal(sig, self._on_signal)
             except Exception:
                 pass
+        tty.setraw(0)
+        self._write("\x1b[?1049h\x1b[?25l\x1b[?2004h"
+                    "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h"
+                    "\x1b[2J\x1b[H")
 
     def _restore_terminal(self):
         try:

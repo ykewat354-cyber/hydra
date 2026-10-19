@@ -149,12 +149,17 @@ class Router:
             except Exception:
                 pass
 
-    def _gate_shrink(self) -> None:
+    def _gate_shrink(self, status: int = None) -> None:
+        """F5: hand the rejection status to the gate; the calibrated semantics
+        decide whether shrinking concurrency can help at all."""
         if self.gate is not None:
             try:
-                self.gate.shrink()
+                self.gate.note_rejection(status)
             except Exception:
-                pass
+                try:
+                    self.gate.shrink()
+                except Exception:
+                    pass
 
     def _slot(self, priority: int):
         if self.gate is None:
@@ -272,7 +277,7 @@ class Router:
                     break
                 except RateLimited as e:
                     all_paid = False
-                    self._gate_shrink()
+                    self._gate_shrink(getattr(e, "status", None))
                     self.sleep(e.retry_after if e.retry_after is not None else self._backoff(attempt))
                     if attempt < self._retries:
                         continue

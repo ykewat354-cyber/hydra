@@ -30,16 +30,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class FakeOllama:
-    def __init__(self, script=None, *, tags=None, web=None, require_auth=None, host="127.0.0.1"):
+    def __init__(self, script=None, *, tags=None, web=None, require_auth=None,
+                 host="127.0.0.1", keepalive=None):
         self.script = {m: list(v) for m, v in (script or {}).items()}
         self.tags = list(tags or [])
         self.web = dict(web or {})
         self.require_auth = require_auth
+        # None = auto: persist only when the client asks for keep-alive;
+        # True = force HTTP/1.1 keep-alive; False = force close-each-time.
+        self.keepalive = keepalive
         self.requests = []          # every request, in order
         self.seen_models = []       # model name per /api/chat call
         self.lock = threading.Lock()
         self.inflight = 0
         self.max_inflight = 0
+        self.accepts = 0            # TCP connections accepted (F7 evidence)
         self._httpd = _Httpd((host, 0), _Handler)
         self._httpd.fake = self
         self._thread = None
@@ -102,6 +107,14 @@ class _Httpd(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def get_request(self):
+        sock, addr = super().get_request()
+        fake = getattr(self, "fake", None)
+        if fake is not None:
+            with fake.lock:
+                fake.accepts += 1
+        return sock, addr
+
     def handle_error(self, request, client_address):
         pass  # clients aborting mid-stream (SIGINT tests) are expected
 
@@ -117,6 +130,26 @@ def _split(text: str, n: int) -> list:
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
+
+    def _prepare_keepalive(self):
+        """Decide per request whether the socket persists (F7 auto/opt-in).
+
+        ``fake.keepalive is None`` (default) = auto: persist only when the
+        request asks for it (``Connection: keep-alive``), so raw test helpers
+        keep their HTTP/1.0 close-each-time framing.  ``True`` forces
+        HTTP/1.1 keep-alive; ``False`` forces a close after every response.
+        """
+        fake = getattr(self.server, "fake", None)
+        want = getattr(fake, "keepalive", None)
+        if want is None:
+            token = (self.headers.get("Connection") or "").lower()
+            want = "keep-alive" in token
+        if want:
+            self.protocol_version = "HTTP/1.1"
+            self.close_connection = False
+        else:
+            self.protocol_version = "HTTP/1.0"
+            self.close_connection = True
 
     def log_message(self, *args):  # keep test output clean
         pass
@@ -138,6 +171,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------- routes
     def do_GET(self):
+        self._prepare_keepalive()
         f = self.fake
         if self.path == "/api/tags":
             with f.lock:
@@ -156,6 +190,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        self._prepare_keepalive()
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b""
         try:
@@ -173,12 +208,28 @@ class _Handler(BaseHTTPRequestHandler):
             self._chat(body)
             return
         if self.path == "/api/web_search":
-            self._json(f.web.get("search", {"results": []}))
+            self._serve_web("search", {"results": []})
             return
         if self.path == "/api/web_fetch":
-            self._json(f.web.get("fetch", {"title": "", "content": ""}))
+            self._serve_web("fetch", {"title": "", "content": ""})
             return
         self._json({"error": "not found"}, 404)
+
+    def _serve_web(self, key: str, default):
+        """A web stub: plain result, callable, or {"_status": N, "body": ...}."""
+        f = self.fake
+        val = f.web.get(key, default)
+        if callable(val):
+            try:
+                val = val(self.headers.get("Authorization") or "")
+            except TypeError:
+                val = val()
+            if val is None:
+                val = default
+        if isinstance(val, dict) and "_status" in val:
+            self._json(val.get("body") or {"error": "stubbed"}, int(val["_status"]))
+            return
+        self._json(val)
 
     # ---------------------------------------------------------- chat
     def _chat(self, body):
@@ -204,9 +255,14 @@ class _Handler(BaseHTTPRequestHandler):
         with f.lock:
             f.inflight += 1
             f.max_inflight = max(f.max_inflight, f.inflight)
+        # Chunked framing only when this socket actually persists: an
+        # HTTP/1.0 close-delimited body must not be chunked.
+        chunked = not self.close_connection
         try:
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
+            if chunked:
+                self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
 
             thinking = node.get("thinking") or ""
@@ -216,8 +272,25 @@ class _Handler(BaseHTTPRequestHandler):
             delay_chunks = float(node.get("delay_chunks", 0) or 0)
 
             def send(obj):
-                self.wfile.write((json.dumps(obj) + "\n").encode())
+                payload = (json.dumps(obj) + "\n").encode()
+                if chunked:
+                    self.wfile.write(f"{len(payload):X}\r\n".encode() + payload + b"\r\n")
+                else:
+                    self.wfile.write(payload)
                 self.wfile.flush()
+
+            if not body.get("stream", True):
+                # stream=false: one complete JSON document, like the real API.
+                send({"model": model, "created_at": "fake", "done": True,
+                      "done_reason": "stop",
+                      "message": {"role": "assistant", "thinking": thinking,
+                                  "content": content, "tool_calls": tools},
+                      "prompt_eval_count": int((node.get("usage") or {}).get("in") or 4),
+                      "eval_count": int((node.get("usage") or {}).get("out") or 1)})
+                if chunked:
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                return
 
             def chunk(msg):
                 send({"model": model, "created_at": "fake",
@@ -257,6 +330,9 @@ class _Handler(BaseHTTPRequestHandler):
                   "done": True, "done_reason": "stop",
                   "prompt_eval_count": pin, "eval_count": eout,
                   "total_duration": 1000000, "eval_duration": 1000000})
+            if chunked:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
         finally:
             with f.lock:
                 f.inflight -= 1

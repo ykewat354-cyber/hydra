@@ -134,7 +134,8 @@ def _battery_line() -> str:
     return text
 
 
-def build_env_block(cwd, cfg=None, role: str = None, project_cap: int = None) -> str:
+def build_env_block(cwd, cfg=None, role: str = None, project_cap: int = None,
+                    caps: dict = None) -> str:
     lines = ["# Environment (fixed for this run)"]
     lines.append(f"date: {time.strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"machine: {platform.machine()} / {platform.system()}")
@@ -144,6 +145,9 @@ def build_env_block(cwd, cfg=None, role: str = None, project_cap: int = None) ->
     clis = [c for c in ("rg", "git", "jq", "node", "npm", "curl", "bash", "patch",
                         "tmux", "fd", "python") if shutil.which(c)]
     lines.append("clis: " + ", ".join(clis))
+    if caps is not None:
+        from . import caps as Caps
+        lines.append(Caps.env_line(caps))   # F6: one line, dead tools are gone
     try:
         du = shutil.disk_usage(str(cwd))
         lines.append(f"disk_free_mb: {du.free // (1 << 20)}")

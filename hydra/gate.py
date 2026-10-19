@@ -28,10 +28,13 @@ class _Slot:
 
 
 class LLMGate:
-    def __init__(self, capacity: int = 1, shrink_secs: float = 300.0):
+    def __init__(self, capacity: int = 1, shrink_secs: float = 300.0,
+                 semantics: str = ""):
         self.plan_cap = max(1, int(capacity))
         self.cap = self.plan_cap
         self.shrink_secs = float(shrink_secs)
+        self.semantics = str(semantics or "")   # F5: queue | reject:<status>
+        self.last_rejection = None              # last status note_rejection saw
         self.shrink_until = 0.0
         self.inflight = 0
         self.max_observed = 0
@@ -105,3 +108,15 @@ class LLMGate:
                 self.cap -= 1
             self.shrink_until = self._now() + self.shrink_secs
             self._cond.notify_all()
+
+    def note_rejection(self, status: int = None) -> None:
+        """F5: react to a rejection using the calibrated semantics.
+
+        ``queue`` means concurrency is not what the server refuses, so running
+        fewer calls in parallel will not help — keep the width.  Uncalibrated
+        (or ``reject:*``) keeps the classic AIMD shrink.
+        """
+        self.last_rejection = status
+        if self.semantics.startswith("queue"):
+            return
+        self.shrink()
