@@ -16,6 +16,7 @@ import re
 import ssl
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 from . import Tool
 from .. import hygiene
@@ -121,6 +122,9 @@ def _tool_web_fetch(args, ctx) -> str:
     url = str(args.get("url") or "").strip()
     if not url:
         return "ERROR: url is required"
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return (f"ERROR: invalid URL (need http:// or https://): {url[:120]}")
     hosted = ""
     try:
         data = ctx.client.web_fetch(url)
