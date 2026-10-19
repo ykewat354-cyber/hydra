@@ -2,6 +2,32 @@
 
 All notable changes to HYDRA. Dates are local (Termux, Android).
 
+## v1.2.1 — 2026-10-19
+
+Bugfix release for the gym-site capability test: the harness hung on a
+foreground server, the model repeated the same command, and the verifier
+passed a dead host.
+
+### Fixed
+
+- **Shell timeout after the shell exits** — a background child can keep the
+  stdout pipe open and keep writing after the shell has exited. The wall-clock
+  timeout now applies regardless of `proc.poll()`, kills the whole process
+  group by its session id, drains the pipe non-blockingly, and tells the model
+  to retry long jobs with `background=true`.
+- **Hard loop breaker** — after `loop.stall_hard_stop` (default 6) identical
+  tool calls, the run ends with a `partial` report instead of burning turns.
+  The existing steering/escalation still fires first at `stall_repeat`.
+- **Deterministic verifier checks** — before the LLM reviewer, existing code
+  artifacts are checked for missing local CSS/JS assets, empty or unbalanced
+  files, JavaScript syntax (`node --check`), and a claimed localhost URL that
+  is not reachable.
+- **Prompt/tool guidance** — servers must use `background=true`; never start a
+  server in the foreground or run `killall python3`.
+- **Eval resume timer** — `kill_after` now starts after the child creates its
+  run directory, so a loaded phone cannot kill Python during startup and leave
+  nothing for `hydra resume`.
+
 ## v1.2.0 — 2026-10-19
 
 Real-API work order: measured Ollama Cloud behaviour on a free key, fixed what

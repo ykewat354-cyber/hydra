@@ -248,8 +248,26 @@ def run_task(base_cfg: dict, task: dict, *, real=False, model_pairs=(),
             cmd = [sys.executable, "-m", "hydra"] + sets + [str(task.get("task") or "")]
             proc = subprocess.Popen(cmd, cwd=workdir, env=child_env,
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            deadline = time.time() + float(kill_after)
-            while time.time() < deadline and proc.poll() is None:
+            # Start the kill timer only after this run has actually created
+            # its run directory.  A loaded phone can take longer than
+            # kill_after just to import Python; killing before run_start
+            # leaves nothing for `hydra resume` and makes the eval flaky.
+            run_deadline = time.time() + float(kill_after)
+            startup_deadline = time.time() + max(10.0, float(kill_after) * 10)
+            saw_run = False
+            runs_dir = home / "runs"
+            while proc.poll() is None:
+                if not saw_run:
+                    try:
+                        saw_run = runs_dir.is_dir() and any(runs_dir.iterdir())
+                    except Exception:
+                        saw_run = False
+                    if saw_run:
+                        run_deadline = time.time() + float(kill_after)
+                if saw_run and time.time() >= run_deadline:
+                    break
+                if time.time() >= startup_deadline:
+                    break
                 time.sleep(0.1)
             if proc.poll() is None:
                 proc.kill()

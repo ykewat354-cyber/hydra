@@ -10,7 +10,11 @@ verifier crash is reported but not fatal.
 """
 from __future__ import annotations
 
+import html.parser
 import re
+import shutil
+import subprocess
+import urllib.request
 from pathlib import Path
 
 from . import config as C
@@ -95,8 +99,207 @@ def _issue_text(issues) -> str:
     return "\n".join(out)
 
 
+class _RefParser(html.parser.HTMLParser):
+    """Collect the tags and local asset references of a generated page."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tags = set()
+        self.refs = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = str(tag or "").lower()
+        self.tags.add(tag)
+        if tag not in ("link", "script", "img"):
+            return
+        for key, value in attrs:
+            if str(key).lower() in ("href", "src") and value:
+                self.refs.append((tag, str(value).strip()))
+
+
+def _artifact_path(agent, rel):
+    p = Path(str(rel)).expanduser()
+    if not p.is_absolute():
+        p = Path(agent.workdir) / p
+    return p.resolve()
+
+
+def _local_asset_issue(workdir, html_path, tag, ref):
+    if not ref:
+        return None
+    low = ref.lower()
+    if low.startswith(("#", "http://", "https://", "//", "data:",
+                       "javascript:", "mailto:", "tel:")):
+        return None
+    # Template expressions and query strings are not filesystem paths.
+    if any(x in ref for x in ("{{", "{%", "${")):
+        return None
+    clean = ref.split("?", 1)[0].split("#", 1)[0].strip()
+    if not clean:
+        return None
+    try:
+        if clean.startswith("/"):
+            # A static server may use either the page's directory or the
+            # project workdir as its document root; accept both.
+            targets = [(html_path.parent / clean.lstrip("/")).resolve(),
+                       (Path(workdir) / clean.lstrip("/")).resolve()]
+        else:
+            targets = [(html_path.parent / clean).resolve()]
+    except Exception:
+        return None
+    if any(t.is_file() for t in targets):
+        return None
+    return {
+        "what": f"{html_path.name} references missing local asset {ref!r}",
+        "fix": f"create {targets[0]} or correct the {tag} reference",
+    }
+
+
+def _html_issues(workdir, rel, path, text):
+    issues = []
+    if not text.strip():
+        return [{"what": f"{rel} is empty", "fix": "write the page before finishing"}]
+    parser = _RefParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception as exc:
+        return [{"what": f"{rel} could not be parsed as HTML: {exc}",
+                 "fix": "fix the HTML structure"}]
+    missing = [t for t in ("html", "body") if t not in parser.tags]
+    if missing:
+        tags = ", ".join("<" + t + ">" for t in missing)
+        issues.append({
+            "what": f"{rel} is missing {tags} structure",
+            "fix": "write a complete HTML document with html/head/body tags",
+        })
+    for tag, ref in parser.refs:
+        issue = _local_asset_issue(workdir, path, tag, ref)
+        if issue:
+            issues.append(issue)
+    return issues
+
+
+def _css_issues(rel, text):
+    if not text.strip():
+        return [{"what": f"{rel} is empty", "fix": "write the stylesheet"}]
+    if text.count("{") != text.count("}"):
+        return [{"what": f"{rel} has unbalanced CSS braces",
+                 "fix": "fix the CSS syntax"}]
+    return []
+
+
+def _js_issues(rel, path, text):
+    if not text.strip():
+        return [{"what": f"{rel} is empty", "fix": "write the script"}]
+    node = shutil.which("node")
+    if not node:
+        return []
+    try:
+        proc = subprocess.run([node, "--check", str(path)],
+                              capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+    if proc.returncode == 0:
+        return []
+    detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    tail = detail[-1] if detail else f"node --check exit {proc.returncode}"
+    return [{"what": f"{rel} has a JavaScript syntax error: {tail[:240]}",
+             "fix": "fix the JavaScript syntax before finishing"}]
+
+
+def _url_issues(agent, has_html):
+    """Catch a false 'hosted at localhost' claim (the gym-site failure)."""
+    if not has_html:
+        return []
+    rep = agent.report or {}
+    text = " ".join([str(rep.get("summary") or "")] +
+                    [str(x) for x in (rep.get("findings") or [])])
+    urls = re.findall(
+        r"https?://(?:localhost|127\.0\.0\.1)(?::\d{2,5})?(?:/[^\s)\]}\"'<>]*)?",
+        text, re.I)
+    issues, seen = [], set()
+    for url in urls:
+        url = url.rstrip(".,;:")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        try:
+            with urllib.request.urlopen(url, timeout=2) as res:
+                code = int(getattr(res, "status", 200) or 200)
+            if code >= 400:
+                issues.append({"what": f"claimed URL {url} returned HTTP {code}",
+                               "fix": "start the server with background=true and verify it"})
+        except Exception as exc:
+            issues.append({
+                "what": f"claimed URL {url} is not reachable: "
+                        f"{type(exc).__name__}: {exc}",
+                "fix": "start the server with background=true, then verify the URL",
+            })
+        if len(issues) >= 2:
+            break
+    return issues
+
+
+def deterministic_issues(agent) -> list:
+    """Cheap, offline checks that run before the LLM reviewer.
+
+    Missing files are left to the existing reviewer so fake/scripted runs keep
+    their current behavior.  Existing code artifacts and a claimed localhost
+    URL are checked here because an LLM review can miss a dead server or a
+    broken HTML asset link (the gym-site false pass).
+    """
+    rep = agent.report or {}
+    paths = list(dict.fromkeys(
+        [str(x) for x in (rep.get("artifacts") or [])] +
+        [str(x) for x in (rep.get("files_changed") or [])]))
+    issues, checked, has_html = [], 0, False
+    for rel in paths:
+        if not rel:
+            continue
+        try:
+            p = _artifact_path(agent, rel)
+            if not p.is_file():
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        suffix = p.suffix.lower()
+        if suffix in (".html", ".htm"):
+            has_html = True
+            issues.extend(_html_issues(agent.workdir, rel, p, text))
+        elif suffix == ".css":
+            issues.extend(_css_issues(rel, text))
+        elif suffix == ".js":
+            issues.extend(_js_issues(rel, p, text))
+        else:
+            continue
+        checked += 1
+        if checked >= 8:
+            break
+    if has_html:
+        issues.extend(_url_issues(agent, has_html))
+    return issues[:10]
+
+
 def check(rt, agent) -> dict:
     rep = agent.report or {}
+    # Deterministic checks come first: a reviewer that cannot run the server
+    # should not be able to pass a page whose CSS/JS is missing or whose
+    # localhost URL is already dead.
+    try:
+        pre = deterministic_issues(agent)
+    except Exception:
+        pre = []
+    if pre:
+        if rt.journal:
+            try:
+                rt.journal.event("verify", agent.id, verdict="fail",
+                                 model="deterministic", issues=pre[:10])
+            except Exception:
+                pass
+        return {"verdict": "fail", "issues": pre, "model": "deterministic",
+                "issue_text": _issue_text(pre)}
     producer = agent.data.get("last_model")
     model = _pick_model(rt, producer)
     base = load_prompt("verifier") or (

@@ -593,6 +593,8 @@ class Agent:
     # -------------------------------------------------- stall detection
     def stall_check(self, rt, calls: list, results: list) -> None:
         repeat = int(C.get(rt.cfg, "loop.stall_repeat", 3) or 3)
+        hard_stop = max(repeat + 1, int(
+            C.get(rt.cfg, "loop.stall_hard_stop", 6) or 6))
         sigs = [c["function"]["name"] + ":" +
                 json.dumps(c["function"]["arguments"], sort_keys=True) for c in calls]
         self._stall_window.append(sigs)
@@ -601,16 +603,54 @@ class Agent:
         for batch in self._stall_window:
             for s in batch:
                 counts[s] = counts.get(s, 0) + 1
-        worst = max(counts.values()) if counts else 0
-        if worst >= repeat:
+        worst_sig = max(counts, key=counts.get) if counts else ""
+        worst = counts.get(worst_sig, 0)
+        prev_sig = str(self.data.get("stall_sig") or "")
+        try:
+            streak = int(self.data.get("stall_streak", 0) or 0)
+        except Exception:
+            streak = 0
+        # `worst` is the count in the rolling window, not the number of new
+        # occurrences in this turn; add only this turn's copies so a three-
+        # turn streak is not counted as 1+2+3=6.
+        new_count = sum(1 for s in sigs if s == worst_sig)
+        if worst_sig == prev_sig:
+            streak += new_count
+        else:
+            streak = new_count
+            self.data["stall_sig"] = worst_sig
+            self.data["stall_notice"] = 0
+        self.data["stall_streak"] = streak
+
+        if streak >= hard_stop:
+            # A steering message is not enough for a model that keeps issuing
+            # the same call (the gym run repeated `killall python3` for 40
+            # minutes).  Stop with a partial report instead of burning turns
+            # and credits forever.  This is only a loop breaker; it does not
+            # ask the user anything.
             self._stall_window.clear()
+            last = self.data.get("last_model")
+            if self.journal is not None:
+                self.journal.event("stall_hard_stop", self.id,
+                                   repeated=streak, model=last)
+            self.set_report(
+                "partial",
+                f"Loop breaker: stopped after {streak} repeated identical tool "
+                "calls without progress. Inspect the last output and retry with "
+                "a different approach.",
+                open_issues=["repeated-action loop breaker fired; result is not verified"])
+            return
+
+        if streak >= repeat and not self.data.get("stall_notice"):
+            self._stall_window.clear()
+            self.data["stall_notice"] = streak
             last = self.data.get("last_model")
             escalated = None
             if last and last not in self.exclude_models and len(self.exclude_models) < 3:
                 self.exclude_models.append(last)
                 escalated = last
             if self.journal is not None:
-                self.journal.event("stall", self.id, repeated=worst, escalate=escalated)
+                self.journal.event("stall", self.id, repeated=streak, escalate=escalated)
             msg = ("Change approach: the same action keeps repeating without new "
                    "progress. ")
             if escalated:

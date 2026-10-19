@@ -134,6 +134,10 @@ def run_agent(agent, rt) -> dict:
                 agent.stall_check(rt, calls, results)
                 if rt.journal:
                     rt.journal.turn_boundary()
+                if agent.finished:
+                    # hard loop breaker set a partial report; do not call the
+                    # model again just to discover that the run is over
+                    break
             except CallCancelled as exc:
                 # first Ctrl-C: the in-flight call/tool is gone, the run lives on
                 time.sleep(0.5)  # give an in-flight tool a moment to notice and die

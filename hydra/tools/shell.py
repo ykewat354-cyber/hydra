@@ -35,8 +35,15 @@ def _env() -> dict:
 
 
 def _kill_group(proc) -> None:
+    # Every Popen here starts a new session, so the process-group id is the
+    # original child's pid.  Look it up by pid, not with getpgid(proc.pid):
+    # after the shell exits, its pid may be gone while a background child is
+    # still alive in the same group.  The old fallback (proc.kill) only
+    # signalled the already-dead shell and left that child running.
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     except Exception:
         try:
             proc.kill()
@@ -103,7 +110,13 @@ def run_shell(rt, cwd, cmd: str, timeout: float, stdin_text=None) -> str:
                 continue
         if cancelled:
             break
-        if time.time() >= end and proc.poll() is None:
+        # The deadline applies even when the shell itself has already exited:
+        # a background child can keep the stdout pipe open and keep writing
+        # (for example a foreground `python3 -m http.server`).  In that case
+        # proc.poll() is not None forever, and the old `and proc.poll() is
+        # None` condition meant the tool could wait indefinitely.  Kill the
+        # whole process group and return a bounded error instead.
+        if time.time() >= end:
             timed_out = True
             _kill_group(proc)
             break
@@ -130,9 +143,15 @@ def run_shell(rt, cwd, cmd: str, timeout: float, stdin_text=None) -> str:
         proc.wait(timeout=5)
     except Exception:
         _kill_group(proc)
+    # Never block here.  A daemonized grandchild can escape the process
+    # group, keep the pipe open, and make a plain os.read hang forever even
+    # after the timeout branch has fired.
     try:
-        rest = os.read(fd, 65536)
-        if rest:
+        os.set_blocking(fd, False)
+        while True:
+            rest = os.read(fd, 65536)
+            if not rest:
+                break
             chunks.append(rest)
     except Exception:
         pass
@@ -144,7 +163,8 @@ def run_shell(rt, cwd, cmd: str, timeout: float, stdin_text=None) -> str:
     if cancelled:
         return text + "\n[interrupted by Ctrl-C — process group killed]"
     if timed_out:
-        return text + f"\n[timeout after {timeout}s — process group killed]"
+        return text + (f"\n[timeout after {timeout}s — process group killed; "
+                       "for a server or long job, retry with background=true]")
     if proc.returncode not in (0, None):
         text += f"\n[exit {proc.returncode}]"
     return text
@@ -267,7 +287,8 @@ def register(reg) -> None:
     reg.register(Tool(
         "bash", "Run a shell command (bash -c) in the shared working directory. "
                 "Returns merged stdout+stderr. Timeout kills the whole process group. "
-                "background=true returns a job id for long-running servers/builds.",
+                "Never run a server in the foreground; background=true returns a "
+                "job id for long-running servers/builds.",
         {"type": "object", "properties": {
             "cmd": {"type": "string"},
             "timeout": {"type": "integer", "description": "seconds (default 120)"},

@@ -46,3 +46,5 @@ Operating rules
 Termux facts: aarch64 Android, no root, $PREFIX=/data/data/com.termux/files/usr,
 install packages with `pkg install -y`, no systemd, no /tmp (use $TMPDIR),
 Termux:API commands are `termux-*`. Long jobs: bash with background=true.
+Servers: start them with background=true, never in the foreground; stop only
+the PID or port you started, never `killall python3`.

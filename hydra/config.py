@@ -37,6 +37,7 @@ DEFAULTS: dict = {
         "tool_timeout": 120,
         "parallel_tools": 4,
         "stall_repeat": 3,
+        "stall_hard_stop": 6,         # stop the run after N repeated identical calls
         "verify": "auto",             # auto | always | never
         "verify_rounds": 3,
     },
@@ -146,6 +147,7 @@ tool_cap        = 6000
 tool_timeout    = 120
 parallel_tools  = 4
 stall_repeat    = 3
+stall_hard_stop = 6               # stop the run after N repeated identical calls
 verify          = "auto"          # auto | always | never
 verify_rounds   = 3
 

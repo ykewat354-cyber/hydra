@@ -21,9 +21,11 @@ curl -fsSL https://raw.githubusercontent.com/ykewat354-cyber/hydra/main/install-
 That clones/updates `~/hydra`, installs `$PREFIX/bin/hydra`, and runs `hydra doctor`.
 Then: `hydra models probe` → `hydra` (opens the TUI) or `hydra "your task"`.
 
-**v1.2.0:** `hydra report --last` · `hydra models bench` / `tune` ·
-`hydra doctor --limits|--caps|--full` · `hydra usage --since 2h --remote` ·
-`hydra update` · `hydra --budget-usd N` · `hydra --detach --notify`.
+**v1.2.1 (bugfix):** bounded shell timeouts, hard loop breaker, deterministic
+code/host checks before verification. **v1.2.0:** `hydra report --last` ·
+`hydra models bench` / `tune` · `hydra doctor --limits|--caps|--full` ·
+`hydra usage --since 2h --remote` · `hydra update` · `hydra --budget-usd N` ·
+`hydra --detach --notify`.
 Free-plan behaviour measured on 2026-10-19 is in [§20](#20-v120--new-commands-and-known-free-plan-limits)
 and [`docs/REAL_API_NOTES.md`](docs/REAL_API_NOTES.md).
 
@@ -224,8 +226,8 @@ def run_agent(agent):
 | **Parallel tool calls** | If a reply contains several `tool_calls`, run them concurrently (pool size `parallel_tools`), return results in call order. |
 | **Tools never raise into the loop** | Every exception becomes a result string: `ERROR: <type>: <message>` plus a short traceback tail. The model self-corrects. |
 | **Tolerant call parser** | If `tool_calls` is empty but `content` holds a call (JSON `{"name","arguments"}`, `<tool_call>…</tool_call>`, a fenced json block, or ReAct `Action:` / `Action Input:`), parse it and journal `parsed_from_text`. Arguments may arrive as an object **or** a JSON string; accept both. |
-| **Unlimited by default** | `max_turns = 0` means no step cap. The stall detector, not a counter, stops runaway loops. |
-| **Stall detector** | Same `(tool, args-hash)` ≥ 3 times in a window, or N turns with no new files / new facts → (1) inject "Change approach: …", (2) escalate to the next model in the chain, (3) spawn a `debugger` or force a re-plan. |
+| **Unlimited by default** | `max_turns = 0` means no step cap. The stall detector stops runaway loops; after `stall_hard_stop` identical calls the run ends with a partial report. |
+| **Stall detector** | Same `(tool, args-hash)` ≥ 3 times in a window, or N turns with no new files / new facts → (1) inject "Change approach: …", (2) escalate to the next model in the chain, (3) hard-stop with a partial report after `stall_hard_stop` (default 6) identical calls. |
 | **Steering inbox** | User lines, child-agent completions and `agent_send` messages are delivered at the next turn boundary as `user` messages. Nothing ever blocks waiting for a human. |
 | **Finish contract** | An agent ends by calling `finish(status, summary, ...)`. A plain-text answer with no tool call is accepted only after one nudge. |
 | **Verification** | `verify = "auto"`: when files changed or acceptance criteria exist, a `reviewer` sub-agent (preferably a *different model family* than the producer) checks the claim against evidence and returns `{"verdict","issues"}`. Fail → issues are injected and the loop continues, up to `verify_rounds`, then the result is accepted as-is. |
@@ -676,6 +678,7 @@ tool_cap        = 6000
 tool_timeout    = 120
 parallel_tools  = 4
 stall_repeat    = 3
+stall_hard_stop = 6                     # end the run after this many identical calls
 verify          = "auto"                # auto | always | never
 verify_rounds   = 3
 
