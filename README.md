@@ -21,7 +21,13 @@ curl -fsSL https://raw.githubusercontent.com/ykewat354-cyber/hydra/main/install-
 That clones/updates `~/hydra`, installs `$PREFIX/bin/hydra`, and runs `hydra doctor`.
 Then: `hydra models probe` → `hydra` (opens the TUI) or `hydra "your task"`.
 
-**Contents:** [1 Hard constraints](#1-hard-constraints) · [2 Free-tier reality check](#2-free-tier-reality-check) · [3 Architecture](#3-architecture) · [4 Install](#4-install-termux) · [5 Agent loop](#5-the-agent-loop) · [6 Token economy](#6-context--token-economy) · [7 Models](#7-models--multi-model-calling) · [8 LLM gate](#8-the-llm-gate) · [9 Sub-agents](#9-sub-agents) · [10 Tools](#10-tools) · [11 Termux](#11-termux-integration) · [12 State & resume](#12-state-journal--resume) · [13 CLI](#13-cli) · [14 Config](#14-config) · [15 Prompts](#15-prompts) · [16 Troubleshooting](#16-troubleshooting) · [17 Build plan](#17-build-plan-for-the-implementing-ai) · [18 Non-goals](#18-non-goals) · [19 Extended features](#19-extended-features-v11)
+**v1.2.0:** `hydra report --last` · `hydra models bench` / `tune` ·
+`hydra doctor --limits|--caps|--full` · `hydra usage --since 2h --remote` ·
+`hydra update` · `hydra --budget-usd N` · `hydra --detach --notify`.
+Free-plan behaviour measured on 2026-10-19 is in [§20](#20-v120--new-commands-and-known-free-plan-limits)
+and [`docs/REAL_API_NOTES.md`](docs/REAL_API_NOTES.md).
+
+**Contents:** [1 Hard constraints](#1-hard-constraints) · [2 Free-tier reality check](#2-free-tier-reality-check) · [3 Architecture](#3-architecture) · [4 Install](#4-install-termux) · [5 Agent loop](#5-the-agent-loop) · [6 Token economy](#6-context--token-economy) · [7 Models](#7-models--multi-model-calling) · [8 LLM gate](#8-the-llm-gate) · [9 Sub-agents](#9-sub-agents) · [10 Tools](#10-tools) · [11 Termux](#11-termux-integration) · [12 State & resume](#12-state-journal--resume) · [13 CLI](#13-cli) · [14 Config](#14-config) · [15 Prompts](#15-prompts) · [16 Troubleshooting](#16-troubleshooting) · [17 Build plan](#17-build-plan-for-the-implementing-ai) · [18 Non-goals](#18-non-goals) · [19 Extended features](#19-extended-features-v11) · [20 v1.2.0 & free-plan limits](#20-v120--new-commands-and-known-free-plan-limits)
 
 ---
 
@@ -52,6 +58,12 @@ Snapshot from `ollama.com/pricing` and `ollama.com/blog/transparent-pricing` (pr
 | Web search / fetch are hosted endpoints on the same key (included with a free account at last check). | Use them, but treat failures as non-fatal. |
 
 **Design consequences:** (1) LLM calls are serialized on the free plan, so sub-agent parallelism lives in *tools and background jobs*, not in model calls. (2) Every token is precious, so isolate context, cap outputs, compact early. (3) Model names are discovered by probing, not hard-coded.
+
+**Measured on 2026-10-19** (this build, free key): six free models answered
+(`gemma4:31b`, `gpt-oss:120b`, `gpt-oss:20b`, `nemotron-3-nano:30b`,
+`nemotron-3-super`, `nemotron-3-ultra`), 12 paid models returned 402, and 14
+concurrent calls all returned 200 with no 429 (the server queues). Details and
+quirks: [§20](#20-v120--new-commands-and-known-free-plan-limits).
 
 ---
 
@@ -949,6 +961,58 @@ redact            = true
 untrusted_paths   = ["~/storage/downloads/**"]
 redact_env        = ["OLLAMA_API_KEY"]
 ```
+
+---
+
+## 20. v1.2.0 — new commands and known free-plan limits
+
+### New and updated commands
+
+```sh
+hydra report --last                  # redacted report; --full, --json, --since 2h, --timeline
+hydra models bench --max-usd 0.12    # B1/B2/B3 fixtures x free models
+hydra models tune [--apply]          # propose/apply role chains from the scorecard
+hydra doctor --limits                # <=6-call concurrency calibration -> ~/.hydra/limits.json
+hydra doctor --caps                  # refresh capability cache -> ~/.hydra/caps.json
+hydra doctor --full                  # tool/disk/DNS/HTTPS/key-status/free-model checks
+hydra usage --since 2h [--remote]    # ledger totals; --remote prints no personal buckets
+hydra update                         # ff-only pull + tests + changelog, rollback on failure
+hydra --budget-usd 0.05 "task"       # opt-in; parks (exit 75) when reached
+hydra --detach --notify "task"       # tmux/background + finish notification
+hydra undo [RUN] [--dry-run]         # restore shadow snapshots (git refs only)
+```
+
+### Known limits on the free plan (measured 2026-10-19)
+
+- **Models:** 6 free (`gemma4:31b`, `gpt-oss:120b`, `gpt-oss:20b`,
+  `nemotron-3-nano:30b`, `nemotron-3-super`, `nemotron-3-ultra`); 12 paid
+  models return **402**; `mistral-large-4` returns **403** while it is being
+  rolled out (not a bad key).
+- **JSON schema is ignored:** all six free models answered in prose for 54/54
+  `format` calls, so structured roles use parse → repair → fallback. Expect the
+  planner/verifier to be repaired occasionally, not schema-enforced.
+- **Concurrency:** the server **queues**; 14 simultaneous calls all returned
+  200, no 429 or `Retry-After`. HYDRA still serializes model calls with its own
+  gate, so sub-agent overlap happens in tools, not model requests.
+- **Web:** `web_search` works; hosted `web_fetch` can return 404 on valid pages
+  (the raw fetcher fallback serves them). Prompt injection is a behavioural
+  risk: in the canary test `gpt-oss:120b` created the marker file; the F9
+  wrapper reminder reduced this in one re-check, but it is **not** a guarantee.
+- **Model quality:** on the bench, B1/B2 pass on all six; the exact `TODO:` list
+  task (B3) passes only on `gemma4:31b` and `nemotron-3-super`. `gpt-oss:20b`
+  cannot disable thinking via `false`; `gpt-oss:120b` sometimes writes a tool
+  payload as prose (HYDRA recovers it).
+- **Flakes:** transient read timeouts and occasional 429s occur at low volume;
+  wrap runs in `timeout` and retry once. First-token latency ~0.7–1.7 s;
+  keep-alive cuts median latency by ~34%.
+- **Context:** the lead baseline is ~4,929 tokens (system + 45 tool schemas +
+  env); compaction triggers after the pinned prefix is counted, so 8k working
+  context compacts once rather than thrashing.
+- **Cost:** all $ figures are HYDRA estimates, calibrated against the Ollama
+  dashboard (H5). Free credits are monthly and can park a run; `hydra resume`
+  continues from the journal.
+
+Full dated evidence: [`docs/REAL_API_NOTES.md`](docs/REAL_API_NOTES.md).
 
 ---
 
