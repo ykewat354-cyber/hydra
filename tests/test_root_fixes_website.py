@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,6 +92,18 @@ class WorkspaceContextTests(_HomeCase):
             self.cwd.name, {"project": {"workspace": False}})
         self.assertEqual(text, "")
 
+    def test_recent_writes_uses_mtime_and_skips_sensitive(self):
+        now = time.time()
+        (Path(self.cwd.name) / "new.txt").write_text("x", encoding="utf-8")
+        old = Path(self.cwd.name) / "old.txt"
+        old.write_text("x", encoding="utf-8")
+        os.utime(old, (100, 100))
+        (Path(self.cwd.name) / "api_key.txt").write_text("x", encoding="utf-8")
+        got = project_mod.recent_writes(self.cwd.name, now - 10)
+        self.assertIn("new.txt", got)
+        self.assertNotIn("old.txt", got)
+        self.assertNotIn("api_key.txt", got)
+
     def test_recent_runs_filter_by_cwd_and_show_files(self):
         cwd = str(Path(self.cwd.name).resolve())
         runs = Path(self.home.name) / "runs"
@@ -134,7 +147,10 @@ class BuiltinSkillTests(_HomeCase):
     def test_builtin_website_skill_is_listed(self):
         skills = project_mod.find_skills(self.cwd.name)
         self.assertIn("website-3d", skills)
-        self.assertIn("Three.js", skills["website-3d"]["body"])
+        body = skills["website-3d"]["body"]
+        self.assertIn("Three.js", body)
+        self.assertIn("sphere body plus two Sprite", body)
+        self.assertIn('literal "FIR"', body)
         listing = project_mod.skills_listing(self.cwd.name, role="lead")
         self.assertIn("website-3d", listing)
 
@@ -170,6 +186,50 @@ class FinishAutoFillTests(Base):
         self.assertEqual(code, 0, report)
         self.assertTrue((Path(self.cwd.name) / "hello.txt").is_file())
         self.assertIn("hello.txt", report.get("files_changed") or [])
+
+    def test_finish_lists_files_written_by_bash(self):
+        from hydra.runtime import Runtime
+
+        self.srv.add("gpt-oss:120b", {"tool_calls": [
+            {"function": {"name": "bash",
+                          "arguments": {"cmd": "printf ok > bash_written.txt"}}}]})
+        self.srv.add("gpt-oss:120b", {"tool_calls": [
+            {"function": {"name": "finish",
+                          "arguments": {"status": "done",
+                                        "summary": "wrote via bash"}}}]})
+        rt = Runtime(self.cfg("loop.verify=never"), cwd=self.cwd.name, quiet=True)
+        try:
+            code, report = rt.run("write via bash then finish")
+        finally:
+            rt.close()
+        self.assertEqual(code, 0, report)
+        self.assertTrue((Path(self.cwd.name) / "bash_written.txt").is_file())
+        self.assertIn("bash_written.txt", report.get("files_changed") or [])
+
+
+class TurnCapTests(Base):
+    def test_cap_report_lists_files_and_nudges_finish(self):
+        from hydra.runtime import Runtime
+
+        self.srv.add("gpt-oss:120b", {"tool_calls": [
+            {"function": {"name": "write_file",
+                          "arguments": {"path": "cap.txt", "content": "x"}}}]})
+        self.srv.add("gpt-oss:120b", {"tool_calls": [
+            {"function": {"name": "read_file",
+                          "arguments": {"path": "cap.txt"}}}]})
+        rt = Runtime(self.cfg("loop.verify=never", "loop.max_turns=2"),
+                     cwd=self.cwd.name, quiet=True)
+        try:
+            code, report = rt.run("write cap.txt then keep going")
+        finally:
+            rt.close()
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["status"], "partial")
+        self.assertIn("cap.txt", report["files_changed"])
+        chats = self.srv.chat_requests()
+        self.assertGreaterEqual(len(chats), 2)
+        # The last real turn must warn the model that the cap is one turn away.
+        self.assertIn("Turn cap", json.dumps(chats[1]["body"]))
 
 
 # ---------------------------------------------------------------- verifier

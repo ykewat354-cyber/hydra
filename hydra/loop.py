@@ -47,6 +47,14 @@ def run_agent(agent, rt) -> dict:
                 if max_turns and agent.turns >= max_turns:
                     agent.set_report("partial", f"Turn cap reached ({max_turns}).")
                     break
+                if max_turns:
+                    left = max_turns - agent.turns
+                    if 0 < left <= 2 and not agent.data.get("cap_nudged"):
+                        agent.data["cap_nudged"] = True
+                        agent.steer(
+                            f"Turn cap: {left} turn(s) left. Stop exploring. Call "
+                            f"finish now with an honest status, summary, "
+                            f"files_changed and any remaining todos/open issues.")
                 agent.turns += 1
                 if agent.turns == 1:
                     # §19.9: capture the pre-run tree as turn 0 so the whole

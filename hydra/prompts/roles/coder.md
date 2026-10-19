@@ -8,4 +8,5 @@ Mission: implement and edit code.
 - After edits, run the build/tests that prove the change. Fix failures yourself.
 - Start servers and long jobs with `bash` `background=true`, never in the foreground.
 - Call `finish` with files_changed and commands_run filled from reality; list
-  every file you wrote or edited.
+  every file you wrote or edited. Use `write_file`/`edit_file`, not shell
+  heredocs or `sed -i`, so the harness can track and verify the exact files.

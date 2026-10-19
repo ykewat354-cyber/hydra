@@ -319,6 +319,7 @@ class Agent:
         self.runtime = None
         self._stall_window: list = []
         self.verify_rounds_left = int(C.get(cfg, "loop.verify_rounds", 3) or 3)
+        self.started_at = time.time()
 
     # -------------------------------------------------- messaging
     def append(self, message: dict) -> None:
@@ -575,12 +576,30 @@ class Agent:
     def finish_from_text(self, text: str) -> None:
         self.set_report("done", str(text or "").strip()[:2000])
 
+    def _written_files(self) -> list:
+        """Exact tool writes plus files modified through shell/other tools."""
+        files = [str(x) for x in (self.data.get("files_written") or [])]
+        try:
+            from .project import recent_writes
+            since = float(getattr(self, "started_at", 0) or 0) - 2.0
+            for p in recent_writes(self.workdir, since, limit=40):
+                if p not in files:
+                    files.append(p)
+        except Exception:
+            pass
+        return files
+
     def set_report(self, status: str, summary: str, *, files_changed=None,
                    commands_run=None, findings=None, open_issues=None, artifacts=None) -> None:
+        files = [str(x) for x in (files_changed or [])]
+        if not files:
+            # A cap/kill/partial report is still a report: never claim no files
+            # after real writes (including shell heredocs the tools cannot see).
+            files = self._written_files()
         self.report = {
             "status": status if status in ("done", "partial", "failed", "killed") else "done",
             "summary": str(summary or ""),
-            "files_changed": [str(x) for x in (files_changed or [])],
+            "files_changed": files,
             "commands_run": [str(x) for x in (commands_run or [])],
             "findings": [str(x) for x in (findings or [])],
             "open_issues": [str(x) for x in (open_issues or [])],
@@ -589,9 +608,15 @@ class Agent:
         self.finished = True
 
     def report_out(self) -> dict:
-        return self.report or {"status": "failed", "summary": "agent ended without finish",
-                               "files_changed": [], "commands_run": [], "findings": [],
-                               "open_issues": [], "artifacts": []}
+        rep = self.report or {"status": "failed", "summary": "agent ended without finish",
+                              "files_changed": [], "commands_run": [], "findings": [],
+                              "open_issues": [], "artifacts": []}
+        if not rep.get("files_changed"):
+            written = self._written_files()
+            if written:
+                rep = dict(rep)
+                rep["files_changed"] = written
+        return rep
 
     # -------------------------------------------------- stall detection
     def stall_check(self, rt, calls: list, results: list) -> None:

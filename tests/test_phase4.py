@@ -118,6 +118,7 @@ class SwarmTests(Base):
         base = [sys.executable, "-m", "hydra",
                 "--set", f"api.host={self.srv.url}",
                 "--set", "api.retries=2",
+                "--set", "loop.verify=never",  # file auto-fill would trigger a reviewer
                 "--set", "journal.fsync=event",
                 "--set", "termux.wake_lock=false",
                 "--set", "termux.notify_on_finish=false",

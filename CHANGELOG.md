@@ -2,6 +2,43 @@
 
 All notable changes to HYDRA. Dates are local (Termux, Android).
 
+## v1.2.3 — 2026-10-19
+
+Second root-fix pass, driven by re-testing the same 3D gym task on the real
+free API. v1.2.2 fixed project context and the website skill; this release
+fixes what the re-test exposed: unreliable file reporting and a model that
+ignored the finish window.
+
+### Fixed
+
+- **File reporting for shell edits** — the executor tracks
+  `write_file`/`edit_file`/`apply_patch`, but models also edit through shell
+  heredocs and `sed -i`. Partial, killed and finished reports now fall back to
+  files modified under the workdir since the agent started (extension
+  allow-list, sensitive/heavy paths skipped). Regression test covers a file
+  written only through `bash`.
+- **Turn-cap finish window** — with 1–2 turns left, the loop now steers the
+  model: stop exploring and call `finish` with an honest report. This prevents
+  the "25/30 turns, no finish, empty files" failure seen in both re-tests.
+- **Hinglish connectors** — "fir"/"phir" means "then", "aur" means "and"; the
+  lead prompt now says these are instructions, not UI text. The previous
+  re-test rendered a literal "FIR" sprite.
+- **Stricter website-3d skill** — a sphere body plus two `Sprite` wings is
+  explicitly a placeholder; require 8–20 butterflies with
+  `BufferGeometry`/`ShapeGeometry` wings that rotate, no literal "FIR" text,
+  one background server started with the `bash` tool's `background=true`
+  (not a shell `&`), and one `curl` 200 check before finishing.
+- **Exact edit tools** — lead/coder prompts and the skill now prefer
+  `write_file`/`edit_file` over shell heredocs so verification can open the
+  exact files that changed.
+
+### Re-test note
+
+The re-test still ended `partial` (30-turn cap) and the butterfly wings were
+still sprites, so the remaining gap is **model capability**, not a harness
+crash or duplicate-project bug. The verifier did its job: it rejected a finish
+that claimed a dead localhost and an unverifiable FIR removal.
+
 ## v1.2.2 — 2026-10-19
 
 Root-fix release for the 3D gym-site capability test: HYDRA built a duplicate

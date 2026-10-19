@@ -146,6 +146,12 @@ _HEAVY_DIRS = {
 _SENSITIVE_NAME = re.compile(
     r"(?i)(secret|token|passwd|password|credential|api[_-]?key|auth|"
     r"\.env($|\.)|\.pem$|id_rsa|id_ed25519)")
+_WRITE_EXTS = {
+    ".html", ".htm", ".css", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+    ".json", ".py", ".md", ".txt", ".sh", ".toml", ".yaml", ".yml", ".xml",
+    ".svg", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".sql", ".rs",
+    ".go", ".java", ".c", ".h", ".cpp", ".hpp",
+}
 _MARKERS = (
     "index.html", "package.json", "pyproject.toml", "requirements.txt",
     "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "HYDRA.md", "README.md",
@@ -230,6 +236,54 @@ def _recent_files(cwd: Path, limit: int = 6, max_scan: int = 3000) -> list:
             scanned += 1
     found.sort(key=lambda x: -x[0])
     return [rel for _, rel in found[:limit]]
+
+
+def recent_writes(cwd, since: float, limit: int = 40, max_scan: int = 5000) -> list:
+    """Files under cwd modified after `since`, for edits done outside the
+    write_file/edit_file tools (shell heredocs, sed, formatters)."""
+    cwd = Path(cwd)
+    try:
+        cwd = cwd.resolve()
+    except Exception:
+        pass
+    if not cwd.is_dir():
+        return []
+    found, scanned = [], 0
+    stack = [(cwd, 0)]
+    while stack and scanned < max_scan:
+        d, depth = stack.pop()
+        try:
+            entries = list(os.scandir(d))
+        except Exception:
+            continue
+        for e in entries:
+            if scanned >= max_scan:
+                break
+            if _skip_name(e.name):
+                continue
+            try:
+                if _is_dir(e):
+                    if depth < 3:
+                        stack.append((Path(e.path), depth + 1))
+                    continue
+                if not e.is_file(follow_symlinks=False):
+                    continue
+                if Path(e.name).suffix.lower() not in _WRITE_EXTS:
+                    continue
+                st = e.stat(follow_symlinks=False)
+            except Exception:
+                continue
+            mtime = float(getattr(st, "st_mtime", 0) or 0)
+            if mtime < since:
+                continue
+            try:
+                rel = str(Path(e.path).relative_to(cwd))
+            except Exception:
+                rel = str(e.path)
+            found.append((mtime, rel))
+            scanned += 1
+    found.sort(key=lambda x: -x[0])
+    return [rel for _mtime, rel in found[:limit]]
 
 
 def workspace_summary(cwd, cfg=None) -> str:
