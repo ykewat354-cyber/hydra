@@ -185,8 +185,14 @@ def _background(ctx, cwd: Path, cmd: str) -> str:
                 fh.close()
             except Exception:
                 pass
-    rt.jobs[jid] = {"proc": proc, "log": log, "cmd": cmd, "started": time.time(),
-                    "agent": ctx.agent.id}
+    meta = {"proc": proc, "log": log, "cmd": cmd, "started": time.time(),
+            "agent": ctx.agent.id}
+    rt.jobs[jid] = meta
+    if rt.journal is not None:
+        # Persist enough to re-attach after a crash: the job outlives us
+        # (start_new_session) but the in-memory Popen handle does not.
+        rt.journal.event("job_start", ctx.agent.id, jid=jid, pid=proc.pid,
+                         cmd=cmd, log=str(log), started=meta["started"])
     return f"started job {jid} (pid {proc.pid}); log: {log}"
 
 

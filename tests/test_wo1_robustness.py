@@ -139,6 +139,48 @@ class ToolRobustnessTests(Base):
         finally:
             rt.close()
 
+    def test_background_job_reattached_after_resume(self):
+        """A job journaled before the crash must not vanish on resume.
+
+        Regression for T14: job_status used to report "no background jobs",
+        so the resumed agent re-ran the same long command and duplicated its
+        side effects.
+        """
+        from hydra.runtime import Runtime
+        rt, lead = self._rt()
+        try:
+            out = self._exec(rt, lead, "bash", {
+                "cmd": "echo job-start; sleep 2; echo job-done",
+                "background": True})
+            m = JOB.search(out)
+            self.assertIsNotNone(m, out)
+            jid, pid = m.group(1), int(m.group(2))
+            proc = rt.jobs[jid]["proc"]
+            run_id = rt.run_id
+        finally:
+            rt.close()
+
+        rt2 = Runtime(self.cfg(), cwd=self.cwd.name, quiet=True)
+        try:
+            lead2 = rt2.resume(run_id)
+            status = self._exec(rt2, lead2, "job_status", {"id": jid})
+            self.assertIn(jid, status)
+            self.assertNotIn("unknown", status)
+            got = ""
+
+            def _appeared():
+                nonlocal got
+                got = self._exec(rt2, lead2, "job_output", {"id": jid, "tail": 10})
+                return "job-done" in got
+
+            self.assertTrue(_wait_for(_appeared, timeout=8), got)
+            self.assertTrue(_wait_for(
+                lambda: "exited" in self._exec(rt2, lead2, "job_status", {"id": jid})))
+            self.assertTrue(_wait_for(lambda: proc.poll() is not None))
+            self.assertNotEqual(rt2.next_job_id(), jid)
+        finally:
+            rt2.close()
+
     # ---------------------------------------------------------------- spill
     def test_200k_chars_capped_and_spill_paged(self):
         rt, lead = self._rt()

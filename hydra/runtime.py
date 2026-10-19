@@ -24,6 +24,51 @@ from .swarm import Swarm
 from .tools import Executor, Registry
 
 
+class _DetachedJob:
+    """Popen look-alike for a job re-attached after a crash/resume.
+
+    The process is no longer our child, so .poll() uses pid liveness and we
+    cannot recover its exit code (0 is reported once it is gone).
+    """
+
+    def __init__(self, pid: int, log: Path, cmd: str, started: float,
+                 agent=None):
+        self.pid = int(pid)
+        self.log = Path(log)
+        self.cmd = cmd
+        self.started = started
+        self.agent = agent
+        self.returncode = None
+
+    def poll(self):
+        if self.returncode is not None:
+            return self.returncode
+        state = None
+        try:
+            with open(f"/proc/{self.pid}/stat", "rb") as fh:
+                state = fh.read().rsplit(b") ", 1)[1].split(b" ", 1)[0]
+        except Exception:
+            state = None
+        if state in (b"Z", b"X", b"x"):
+            self.returncode = 0
+            return self.returncode
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            self.returncode = 0
+        except PermissionError:
+            return None
+        except OSError:
+            self.returncode = 0
+        return self.returncode
+
+    def kill(self):
+        try:
+            os.kill(self.pid, 9)
+        except OSError:
+            pass
+
+
 class Runtime:
     def __init__(self, cfg: dict, *, cwd=None, quiet=False, json_out=False,
                  verbose=False, ui=None):
@@ -93,6 +138,41 @@ class Runtime:
         with self._lock:
             self._job_seq += 1
             return f"j{self._job_seq}"
+
+    def _reattach_jobs(self) -> None:
+        """Recover background jobs journaled before a crash.
+
+        The child was started in its own session, so it usually survives the
+        harness being killed. Without this the resumed agent is told "no
+        background jobs" and repeats a command whose effects are still coming.
+        """
+        mx = 0
+        for ev in J.read_events(self.run_id):
+            if ev.get("type") != "job_start":
+                continue
+            jid = str(ev.get("jid") or "")
+            try:
+                pid = int(ev.get("pid"))
+            except (TypeError, ValueError):
+                continue
+            if not jid:
+                continue
+            self.jobs[jid] = {
+                "proc": _DetachedJob(pid, Path(ev.get("log") or ""),
+                                     str(ev.get("cmd") or ""),
+                                     float(ev.get("started") or 0),
+                                     ev.get("agent")),
+                "log": Path(ev.get("log") or ""),
+                "cmd": str(ev.get("cmd") or ""),
+                "started": float(ev.get("started") or 0),
+                "agent": ev.get("agent"),
+            }
+            try:
+                mx = max(mx, int(jid.lstrip("j")))
+            except ValueError:
+                pass
+        with self._lock:
+            self._job_seq = max(self._job_seq, mx)
 
     # -------------------------------------------------- termux niceties
     def wake_lock(self) -> None:
@@ -197,6 +277,7 @@ class Runtime:
         self.run_meta = dict(data)
         self.run_meta["status"] = "running"
         self.journal.event("run_resume", None)
+        self._reattach_jobs()
         # re-attach children that were alive when the process was killed
         try:
             n = self.swarm.rebuild()
