@@ -303,6 +303,75 @@ class AppMoreTests(AppTests):
         app.feed_bytes(b"\x14")
         self.assertFalse(app.verbose)
 
+    def test_scroll_keys_do_not_replay_history(self):
+        app = self._app()
+        for i in range(60):
+            app.add_notice(f"line {i}")
+        app._add_history("old prompt")
+        app.render(80, 20)
+        self.assertEqual(app.scroll, 0)
+        app.feed_bytes(b"\x1b[A")             # Up with an empty composer
+        self.assertGreater(app.scroll, 0)
+        self.assertEqual(app.input, "")
+        up = app.scroll
+        app.feed_bytes(b"\x1b[B")             # Down
+        self.assertLess(app.scroll, up)
+        app.feed_bytes(b"\x1b[F")             # End = live
+        self.assertEqual(app.scroll, 0)
+        app.feed_bytes(b"\x10")               # Ctrl-P = history
+        self.assertEqual(app.input, "old prompt")
+        app.feed_bytes(b"\x0e")               # Ctrl-N = next
+        self.assertEqual(app.input, "")
+        app.feed_bytes(b"\x1b[1;2A")          # Shift+Up = history even when empty
+        self.assertEqual(app.input, "old prompt")
+        app.input = "draft"
+        app.cursor = len(app.input)
+        app.feed_bytes(b"\x1b[A")             # Up scrolls even with a draft
+        self.assertGreater(app.scroll, 0)
+        self.assertEqual(app.input, "draft")
+        app.feed_bytes(b"\x1b[F")             # End = live, draft untouched
+        self.assertEqual(app.scroll, 0)
+        self.assertEqual(app.input, "draft")
+        app.input = ""
+        app.feed_bytes(b"\x1b[<64;10;10M")    # SGR wheel up
+        self.assertGreater(app.scroll, 0)
+        app.feed_bytes(b"\x1b[<65;10;10M")    # SGR wheel down
+        self.assertEqual(app.scroll, 0)
+        app.feed_bytes(b"\x1b[<0;10;5M")      # touch/left press
+        app.feed_bytes(b"\x1b[<32;10;15M")    # drag down = older content
+        self.assertGreater(app.scroll, 0)
+        app.feed_bytes(b"\x1b[<0;10;15m")     # release
+        self.assertFalse(app._mouse_pressed)
+        app.feed_bytes(b"\x1b[F")
+        self.assertEqual(app.scroll, 0)
+        app.feed_bytes(b"\x1b[<64;10;")     # split SGR wheel report
+        self.assertFalse(app._canceling)
+        app.feed_bytes(b"5M")               # completes the sequence
+        self.assertGreater(app.scroll, 0)
+        app.feed_bytes(b"\x1b[F")
+        self.assertEqual(app.scroll, 0)
+
+    def test_new_output_preserves_scrollback(self):
+        app = self._app()
+        app.run_id = "r_test"
+        for i in range(60):
+            app.add_notice(f"line {i}")
+        app.render(80, 20)
+        app.feed_bytes(b"\x1b[A")
+        old = app.scroll
+        self.assertGreater(old, 0)
+        app.add_assistant("new output while the user reads")
+        app.render(80, 20)
+        self.assertGreaterEqual(app.scroll, old)
+        self.assertNotEqual(app.scroll, 0)
+        text = "\n".join(app.render(80, 20))
+        self.assertIn("End = live", text)
+
+    def test_lead_prompt_keeps_hinglish(self):
+        text = (REPO / "hydra/prompts/lead.md").read_text(encoding="utf-8")
+        self.assertIn("Hinglish", text)
+        self.assertIn("Devanagari", text)
+
     def test_sidebar_and_narrow_layout(self):
         app = self._app()
         app.event({"type": "run_start", "run": "r_wide", "task": "x",

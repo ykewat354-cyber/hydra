@@ -471,7 +471,9 @@ commands
   /quit              leave (an active run is journaled; hydra resume continues)
 
 keys
-  Enter send · Tab complete a /command · Up/Down history · PgUp/PgDn scroll
+  Enter send · Tab complete a /command · Up/Down (+ touch) scroll transcript
+  Ctrl-P/Ctrl-N history · Shift+Up/Down history · PgUp/PgDn scroll
+  End live output when scrolled · mouse wheel also scrolls
   Ctrl-C cancel (twice = stop) · Esc cancel · Ctrl-D quit · Ctrl-O copy
   Ctrl-L clear · Ctrl-T toggle verbose tool output
 """
@@ -479,8 +481,11 @@ keys
 KEYS_TEXT = """\
 Enter       send the task / steer
 Tab         complete a slash command
-Up / Down   input history (or command matches while typing /)
+Up / Down   scroll the transcript (touch-scroll sends these too)
+Ctrl-P/N    previous / next input history
+Shift+Up/Dn previous / next input history
 PgUp/PgDn   scroll the transcript
+End         jump to live output when scrolled
 Ctrl-C      cancel the in-flight call; twice within 2s stops the run
 Esc         cancel the in-flight call (same as Ctrl-C)
 Ctrl-D      quit when the input is empty
@@ -584,6 +589,8 @@ class App:
         self._canceling = False
         self._pasting = False
         self._paste_buf = ""
+        self._mouse_pressed = False
+        self._mouse_last_y = 0
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self._keybuf = ""
         self._last_draw = 0.0
@@ -643,7 +650,6 @@ class App:
             return
         self.blocks.append(Block("assistant", text=text, final=final))
         self.last_assistant = text
-        self.scroll = 0
         self._bump()
 
     def add_user(self, text: str, steer: bool = False):
@@ -998,7 +1004,6 @@ class App:
             self.blocks.append(Block("subreport", agent=aid, meta={
                 "role": a.role, "status": status, "summary": summary}))
             self._bump()
-        self.scroll = 0
 
     def _on_delta(self, aid: str, kind: str, text: str):
         if kind == "thinking":
@@ -1084,8 +1089,8 @@ class App:
         self.pending_steers.clear()
         self._stream_block = None
         self._stream_agent = None
-        self.scroll = 0
-        self.flash(f"{status} · {U.fmt_duration(self.done_at - (self.run_started or self.done_at))}",
+        self.flash(f"{status} · {U.fmt_duration(self.done_at - (self.run_started or self.done_at))}"
+                   + (" · End = latest" if self.scroll else ""),
                    2.0)
         self._bump()
 
@@ -1098,8 +1103,10 @@ class App:
         for b in self.blocks:
             lines.extend(render_block(b, width, self.theme, self.verbose))
         total = len(lines)
-        if self.scroll > 0 and total > self._last_total:
-            self.scroll += total - self._last_total
+        if self.scroll > 0 and total != self._last_total:
+            # keep the reader's place: new output shifts the window, it never
+            # yanks them back to the bottom.
+            self.scroll = max(0, self.scroll + (total - self._last_total))
         self._last_total = total
         self._cache_key = key
         self._cache_lines = lines
@@ -1199,6 +1206,9 @@ class App:
                 elif self.phase == "starting":
                     phase = "starting"
                 bits = [f"{spin} {phase}"]
+                if self.scroll:
+                    bits.append(f"↑{self.scroll}" +
+                                (" End=live" if width >= 58 else ""))
                 if self.current_model:
                     bits.append(self.current_model)
                 if width >= 58:
@@ -1209,20 +1219,19 @@ class App:
                         bits.append(U.fmt_duration(time.time() - self.run_started))
                 if self.agent_count > 1:
                     bits.append(f"{self.agent_count} agents")
-                if self.scroll:
-                    bits.append(f"↑{self.scroll}")
                 bits.append("ctrl-c cancel" if width >= 52 else "^C cancel")
                 text, style = " · ".join(bits), "status"
             else:
                 if self.run_id:
                     status = (self.last_report or {}).get("status") or "ready"
                     bits = [f"{self.theme.sym('dot')} {status}"]
+                    if self.scroll:
+                        bits.append(f"↑{self.scroll}" +
+                                    (" End=live" if width >= 58 else ""))
                     if self.turns:
                         bits.append(f"{self.turns} turns")
                     if self.cost:
                         bits.append(U.fmt_money(self.cost))
-                    if self.scroll:
-                        bits.append(f"↑{self.scroll}")
                     bits.append("enter: new task · /help" if width >= 58 else "/help")
                     text, style = " · ".join(bits), "ok" if status == "done" else "status"
                 else:
@@ -1372,6 +1381,25 @@ class App:
         self._keybuf += text
         self._parse_keys()
 
+    def _handle_mouse(self, code: int, x: int, y: int, final: str):
+        """Wheel and drag-to-scroll; taps are ignored (Ctrl-O copies text)."""
+        if code & 64:                      # wheel: 64 up, 65 down
+            self.handle_action("WHEELDN" if code & 1 else "WHEELUP")
+            return
+        if code & 32:                      # motion while a button is held
+            if self._mouse_pressed:
+                dy = int(y) - int(self._mouse_last_y)
+                if dy:
+                    # dragging down pulls older content into view
+                    self._scroll_by(dy)
+                    self._mouse_last_y = int(y)
+            return
+        if final == "m" or (code & 3) == 3:  # release
+            self._mouse_pressed = False
+            return
+        self._mouse_pressed = True
+        self._mouse_last_y = int(y)
+
     def _parse_keys(self):
         buf = self._keybuf
         while buf:
@@ -1392,6 +1420,23 @@ class App:
                 buf = buf[6:]
                 continue
             if buf.startswith("\x1b"):
+                # SGR mouse wheel/drag (mouse tracking is enabled in
+                # _install_terminal; Ctrl-O still copies the answer)
+                m = re.match(r"^\x1b\[<(\d+);(\d+);(\d+)([Mm])", buf)
+                if m:
+                    code, x, y = (int(m.group(1)), int(m.group(2)),
+                                  int(m.group(3)))
+                    final = m.group(4)
+                    buf = buf[m.end():]
+                    self._handle_mouse(code, x, y, final)
+                    continue
+                if buf.startswith("\x1b[<"):
+                    # an SGR mouse report split across reads: wait, never treat
+                    # the ESC as "cancel the run".
+                    if len(buf) < 64:
+                        break
+                    buf = buf[1:]
+                    continue
                 # SS3 / CSI sequences
                 m = re.match(r"^\x1b\[([0-9;]*)([A-Za-z~])", buf)
                 if m:
@@ -1399,9 +1444,9 @@ class App:
                     final = m.group(2)
                     key = None
                     if final == "A":
-                        key = "UP"
+                        key = "HISTUP" if ";" in seq else "UP"
                     elif final == "B":
-                        key = "DOWN"
+                        key = "HISTDN" if ";" in seq else "DOWN"
                     elif final == "C":
                         key = "RIGHT"
                     elif final == "D":
@@ -1454,6 +1499,10 @@ class App:
                     self.handle_action("CTRL_L")
                 elif ch == "\x0f":
                     self.handle_action("CTRL_O")
+                elif ch == "\x10":
+                    self.handle_action("PREV")
+                elif ch == "\x0e":
+                    self.handle_action("NEXT")
                 elif ch == "\x14":
                     self.handle_action("CTRL_T")
                 elif ch == "\x01":
@@ -1524,6 +1573,20 @@ class App:
         self.hist_idx = None
         self._force = True
 
+    def _scroll_by(self, delta: int):
+        """Scroll the transcript; ``scroll == 0`` means live (follow bottom)."""
+        total = max(0, int(getattr(self, "_last_total", 0)))
+        height = max(1, int(getattr(self, "_last_transcript_height", 1)))
+        max_scroll = max(0, total - height)
+        old = self.scroll
+        self.scroll = max(0, min(max_scroll, self.scroll + int(delta)))
+        if old == 0 and self.scroll > 0:
+            self.flash("scrollback — End = live output", 1.4)
+        elif old > 0 and self.scroll == 0:
+            self.flash("following live output", 1.0)
+        self._force = True
+        self._dirty = True
+
     def handle_action(self, action: str):
         if action == "ENTER":
             self.submit_input()
@@ -1541,8 +1604,15 @@ class App:
             self.cursor = 0
             self._force = True
         elif action == "END":
-            self.cursor = len(self.input)
-            self._force = True
+            if self.scroll:
+                # reading scrollback? End returns to the live bottom instead of
+                # silently editing the composer behind the user's back.
+                self.scroll = 0
+                self.flash("following live output", 1.2)
+                self._force = True
+            else:
+                self.cursor = len(self.input)
+                self._force = True
         elif action == "UP":
             matches = self._ac_matches()
             if matches and self.input.startswith("/"):
@@ -1551,7 +1621,10 @@ class App:
                 self.cursor = len(self.input)
                 self._force = True
             else:
-                self._history(-1)
+                # On a phone the terminal turns a touch-scroll into arrow keys.
+                # Scrolling must scroll, not replay old prompts — even when a
+                # draft is already in the composer. Ctrl-P/Shift+Up = history.
+                self._scroll_by(3)
         elif action == "DOWN":
             matches = self._ac_matches()
             if matches and self.input.startswith("/"):
@@ -1560,16 +1633,21 @@ class App:
                 self.cursor = len(self.input)
                 self._force = True
             else:
-                self._history(1)
+                self._scroll_by(-3)
+        elif action in ("HISTUP", "PREV"):
+            self._history(-1)
+        elif action in ("HISTDN", "NEXT"):
+            self._history(1)
         elif action == "TAB":
             self._complete()
         elif action == "PGUP":
-            self.scroll = min(max(0, self._last_total - 1),
-                              self.scroll + max(2, self._last_transcript_height - 2))
-            self._force = True
+            self._scroll_by(max(2, self._last_transcript_height - 2))
         elif action == "PGDN":
-            self.scroll = max(0, self.scroll - max(2, self._last_transcript_height - 2))
-            self._force = True
+            self._scroll_by(-max(2, self._last_transcript_height - 2))
+        elif action == "WHEELUP":
+            self._scroll_by(3)
+        elif action == "WHEELDN":
+            self._scroll_by(-3)
         elif action == "CTRL_C":
             self._cancel_pressed()
         elif action == "ESC":
@@ -2228,7 +2306,9 @@ class App:
         import tty
         self._old_term = termios.tcgetattr(0)
         tty.setraw(0)
-        self._write("\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[2J\x1b[H")
+        self._write("\x1b[?1049h\x1b[?25l\x1b[?2004h"
+                    "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h"
+                    "\x1b[2J\x1b[H")
         for sig in (signal.SIGWINCH, signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             try:
                 self._old_sigs[sig] = signal.getsignal(sig)
@@ -2241,7 +2321,8 @@ class App:
 
     def _restore_terminal(self):
         try:
-            self._write("\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l")
+            self._write("\x1b[?1007l\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+                        "\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l")
         except Exception:
             pass
         if self._old_term is not None:

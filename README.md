@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.1.0).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 123 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.1 adds the full-screen TUI, research deliverable enforcement, and a raw web-fetch fallback.
+> **Status: implemented (v1.1.0).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 126 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.1 adds the full-screen TUI, research deliverable enforcement, and a raw web-fetch fallback.
 
 ### Install (one line)
 
@@ -589,8 +589,10 @@ calls collapse to one line, and the composer stays open while the run continues.
 |---|---|
 | `Enter` | submit a task (or steer the live run) |
 | `Tab` | complete a `/command` |
-| `↑` / `↓` | input history |
-| `PgUp` / `PgDn` | scroll the transcript (mouse wheel works where Termux sends it) |
+| `↑` / `↓`, touch-scroll, mouse wheel | scroll the transcript (never replaces your draft with an old prompt) |
+| `Ctrl-P` / `Ctrl-N`, `Shift+↑/↓` | previous / next input history |
+| `PgUp` / `PgDn` | scroll a page |
+| `End` | jump back to live output when scrolled |
 | `Ctrl-C` / `Esc` | cancel the in-flight call; the run stays alive |
 | `Ctrl-C` twice (running) | stop the run (the checkpoint stays resumable) |
 | `Ctrl-C` twice (idle) | leave the TUI |
@@ -603,6 +605,13 @@ Slash commands: `/help` · `/clear` · `/copy` · `/plan` · `/pause` · `/unpau
 `/resume` · `/tree` · `/kill aN` · `/model role=model` · `/models` · `/cost` ·
 `/note text` · `/undo` · `/runs` · `/doctor` · `/init` · `/keys` · `/quit` ·
 `/verbose`. Custom project commands (`~/.hydra/commands/*.md`) also work.
+
+The transcript has real scrollback: touch-scroll, mouse wheel/drag, `↑/↓` and
+`PgUp/PgDn` move through it, `End` returns to live output, and new output never
+yanks you back to the bottom. `↑/↓` only scroll; input history is `Ctrl-P/N`
+(or `Shift+↑/↓`), so scrolling can never replace your draft with an old prompt.
+Assistant replies mirror the user's language and script: Hinglish in, simple
+Hinglish out (Roman), never a surprise switch to Devanagari Hindi.
 
 The layout is responsive: a right sidebar appears at ≥96 columns; below that the
 transcript uses the full width. The minimum usable width is 30 columns. Pipes,
