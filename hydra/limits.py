@@ -33,6 +33,10 @@ class ProbeError(RuntimeError):
     """Could not classify the server (network/auth/model errors)."""
 
 
+class BudgetExceeded(RuntimeError):
+    """F10: opt-in USD cap reached; checkpoint + park (exit 75)."""
+
+
 def limits_path() -> Path:
     return C.home() / "limits.json"
 

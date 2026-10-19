@@ -447,6 +447,11 @@ class OllamaCloud:
     def web_fetch(self, url: str) -> dict:
         return self._json_request("POST", "/api/web_fetch", {"url": url})
 
+    def usage_remote(self) -> dict:
+        """GET /api/usage (T08: 200; /api/me is 405). Raises on failure."""
+        data = self._json_request("GET", "/api/usage")
+        return data if isinstance(data, dict) else {}
+
     def usage(self):
         """Best-effort; the endpoint is undocumented. Never raises."""
         for path in ("/api/usage", "/api/me"):

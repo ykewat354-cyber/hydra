@@ -11,10 +11,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
+import socket
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -26,7 +30,7 @@ from .client import CallCancelled
 
 COMMANDS = {"run", "resume", "ls", "tail", "tree", "usage", "doctor", "kill",
             "models", "undo", "init", "map", "eval", "daemon", "schedule",
-            "report", "help", "version"}
+            "report", "update", "help", "version"}
 
 HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud).
 
@@ -47,7 +51,8 @@ commands:
   tail [RUN] [-a AGENT]  recent events of a run
   tree [RUN]            agent tree with status and tokens
   report [RUN|--last]   paste-friendly run summary (--json --full --since 2h --timeline)
-  usage [RUN]           token ledger + cost estimate (all runs if omitted)
+  usage [RUN]           MTD ledger: totals, per model/run (--since 2h|3d,
+                        --remote: aggregate server totals only)
   models probe|ls|pin   discover models your key can use
   models bench          benchmark models on B1/B2/B3 -> ~/.hydra/scorecard.json
   models tune [--apply] propose role chains from the scorecard
@@ -57,8 +62,9 @@ commands:
   undo [RUN] [--to N]   restore the workdir from a shadow snapshot
   eval [SUITE]          run scripted eval suites on the fake server
   init                  the lead explores the repo and writes HYDRA.md
-  doctor                environment checks (--limits: calibrate concurrency,
-                        --caps: force a capability re-check)
+  doctor                environment checks (--full: deep check, --limits:
+                        calibrate concurrency, --caps: force a capability re-check)
+  update                git pull --ff-only + offline tests, rollback on failure
   kill RUN              stop a run
 
 flags:
@@ -66,6 +72,7 @@ flags:
   --lead MODEL          pin the lead model
   --name NAME           name this run
   --max-inflight N      LLM gate slots
+  --budget-usd N        opt-in spend cap; park at N (default: off)
   --continue            resume the last run started in this cwd
   --plain / --no-tui    no full-screen UI; compact stream (auto when piped)
   --debug-http          append runs/<id>/http.jsonl (or HYDRA_DEBUG_HTTP=1)
@@ -104,6 +111,7 @@ class Opts:
         self.plain = False
         self.verbose = False
         self.debug_http = False
+        self.budget = None
 
 
 def _parse(argv):
@@ -132,6 +140,19 @@ def _parse(argv):
         elif a == "--max-inflight":
             i += 1
             o.max_inflight = argv[i]
+        elif a == "--budget-usd" or a.startswith("--budget-usd="):
+            raw = a.split("=", 1)[1] if "=" in a else None
+            if raw is None:
+                i += 1
+                if i >= len(argv):
+                    raise SystemExit("hydra: --budget-usd needs a number")
+                raw = argv[i]
+            try:
+                o.budget = float(raw)
+                if o.budget < 0:
+                    raise ValueError
+            except ValueError:
+                raise SystemExit("hydra: --budget-usd needs a non-negative number")
         elif a == "--wait-reset":
             o.wait_reset = True
         elif a == "--debug-http":
@@ -172,6 +193,8 @@ def main(argv=None) -> int:
     overrides = list(o.sets)
     if o.max_inflight:
         overrides.append(f"api.max_inflight={o.max_inflight}")
+    if o.budget is not None:
+        overrides.append(f"budget.usd={o.budget}")
     if o.wait_reset:
         overrides.append("park.wait_reset=true")
     if o.debug_http:
@@ -197,7 +220,7 @@ def main(argv=None) -> int:
     if cmd == "ls":
         return cmd_ls()
     if cmd == "usage":
-        return cmd_usage(rest[1:])
+        return cmd_usage(cfg, rest[1:])
     if cmd == "tail":
         return cmd_tail(rest[1:])
     if cmd == "tree":
@@ -228,6 +251,9 @@ def main(argv=None) -> int:
         return cmd_undo(cfg, rest[1:], o)
     if cmd == "eval":
         return cmd_eval(cfg, rest[1:], o)
+    if cmd == "update":
+        from . import update as U
+        return U.cli(cfg, rest[1:])
 
     if cmd == "run":
         args = rest[1:]
@@ -600,8 +626,9 @@ def _footer(rt, report, code) -> None:
     started = rt.run_meta.get("started") or time.time()
     dur = max(0, int(time.time() - started))
     mins, secs = divmod(dur, 60)
-    status = (report or {}).get("status") or \
-        {"75": "parked", "130": "interrupted"}.get(str(code), "failed" if code else "done")
+    status = ({"75": "parked", "130": "interrupted"}.get(str(code))
+              or (report or {}).get("status")
+              or ("failed" if code else "done"))
     if rt.ui.json_out:
         print(json.dumps({"type": "run_end", "status": status, "exit_code": code,
                           "turns": turns, "agents": len(rt.agents),
@@ -1112,33 +1139,142 @@ def cmd_tree(args) -> int:
     return 0
 
 
-def cmd_usage(args) -> int:
+_SINCE_RE = re.compile(r"^(\d+)([hdwm])$")
+
+
+def _since_cutoff(raw):
+    m = _SINCE_RE.match(str(raw or "").strip().lower())
+    if not m:
+        return None
+    mult = {"h": 3600, "d": 86400, "w": 7 * 86400, "m": 30 * 86400}[m.group(2)]
+    return time.time() - int(m.group(1)) * mult
+
+
+def _month_start(now=None):
+    lt = time.localtime(time.time() if now is None else now)
+    return time.mktime((lt.tm_year, lt.tm_mon, 1, 0, 0, 0, 0, 0, -1))
+
+
+def _usage_sum(recs):
+    out = {"calls": len(recs), "in": 0, "out": 0, "est": 0.0}
+    for r in recs:
+        out["in"] += int(r.get("in", 0) or 0)
+        out["out"] += int(r.get("out", 0) or 0)
+        out["est"] += float(r.get("est_usd", 0.0) or 0.0)
+    return out
+
+
+def _print_remote_usage(data) -> None:
+    """Print only aggregate fields — never buckets or account details."""
+    print("remote usage:")
+    for key in ("range", "granularity", "totals"):
+        if key not in data:
+            print(f"  {key}: (not provided)")
+            continue
+        val = data.get(key)
+        if isinstance(val, (dict, list)):
+            val = json.dumps(val, sort_keys=True, ensure_ascii=False)
+        print(f"  {key}: {val}")
+
+
+def cmd_usage(cfg, args=None) -> int:
+    if args is None and not isinstance(cfg, dict):
+        args, cfg = list(cfg), C.load_config(project_dir=os.getcwd())
+    args = list(args or [])
     rid = None
-    if args:
-        rid = J.find_run(args[0])
-        if not rid:
-            print(f"hydra: run not found: {args[0]}")
+    since = None
+    since_label = ""
+    remote = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--remote":
+            remote = True
+        elif a == "--since" or a.startswith("--since="):
+            raw = a.split("=", 1)[1] if "=" in a else None
+            if raw is None:
+                i += 1
+                raw = args[i] if i < len(args) else ""
+            since = _since_cutoff(raw)
+            if since is None:
+                print("hydra: --since needs a duration like 2h or 3d")
+                return 2
+            since_label = str(raw)
+        elif a.startswith("-"):
+            print(f"hydra: unknown usage option: {a}")
             return 2
+        elif rid is None:
+            rid = J.find_run(a)
+            if not rid:
+                print(f"hydra: run not found: {a}")
+                return 2
+        else:
+            print(f"hydra: unexpected argument: {a}")
+            return 2
+        i += 1
+
+    if remote:
+        from . import hygiene
+        from .client import OllamaCloud
+        host = C.get(cfg, "api.host", "https://ollama.com")
+        cli = OllamaCloud(host, C.load_key(cfg) or "",
+                          C.get(cfg, "api.connect_timeout", 15) or 15,
+                          C.get(cfg, "api.idle_timeout", 90) or 90)
+        cli.redact = hygiene.make_redactor(cfg)
+        try:
+            data = cli.usage_remote()
+            if not data:
+                raise RuntimeError("empty response")
+        except Exception:
+            print("remote usage unavailable")
+            return 1
+        finally:
+            cli.close()
+        _print_remote_usage(data)
+        return 0
+
     recs = J.read_usage(rid)
-    if not recs:
+    cut = since if since is not None else _month_start()
+    window = "month-to-date" if since is None else f"since {since_label}"
+    kept = []
+    for r in recs:
+        try:
+            ts = float(r.get("ts"))
+        except (TypeError, ValueError):
+            kept.append(r)       # tolerate hand-written ledgers
+            continue
+        if ts >= cut:
+            kept.append(r)
+    if not kept:
         print("no usage recorded yet")
         return 0
-    by_model = {}
-    for r in recs:
-        d = by_model.setdefault(r.get("model", "?"), {"in": 0, "out": 0, "est": 0.0, "n": 0})
-        d["in"] += int(r.get("in", 0))
-        d["out"] += int(r.get("out", 0))
-        d["est"] += float(r.get("est_usd", 0.0))
+
+    by_model, by_run = {}, {}
+    for r in kept:
+        m = r.get("model", "?")
+        d = by_model.setdefault(m, {"in": 0, "out": 0, "est": 0.0, "n": 0})
+        d["in"] += int(r.get("in", 0) or 0)
+        d["out"] += int(r.get("out", 0) or 0)
+        d["est"] += float(r.get("est_usd", 0.0) or 0.0)
         d["n"] += 1
+        run = str(r.get("run") or rid or "?")
+        by_run.setdefault(run, []).append(r)
+
+    total = _usage_sum(kept)
     scope = rid or "all runs"
-    print(f"usage ({scope}):")
+    print(f"usage ({scope}, {window}):")
+    print(f"  total: {total['calls']} calls · {total['in'] // 1000}k in / "
+          f"{total['out'] // 1000}k out · est ${total['est']:.4f}")
+    print("  per model:")
     for m, d in sorted(by_model.items()):
-        print(f"  {m:<24} {d['n']:>3} calls  {d['in'] // 1000:>5}k in  "
+        print(f"    {m:<24} {d['n']:>3} calls  {d['in'] // 1000:>5}k in  "
               f"{d['out'] // 1000:>4}k out  ~${d['est']:.4f}")
-    tin = sum(d["in"] for d in by_model.values())
-    tout = sum(d["out"] for d in by_model.values())
-    est = sum(d["est"] for d in by_model.values())
-    print(f"  total: {tin // 1000}k in / {tout // 1000}k out · est ${est:.4f}")
+    if rid is None:
+        print("  per run:")
+        for run, rr in sorted(by_run.items()):
+            s = _usage_sum(rr)
+            print(f"    {run:<20} {s['calls']:>3} calls  {s['in'] // 1000:>5}k in  "
+                  f"{s['out'] // 1000:>4}k out  ~${s['est']:.4f}")
     return 0
 
 
@@ -1230,9 +1366,117 @@ def _doctor_caps(cfg) -> int:
     return 0
 
 
+def _net_check(host: str, port: int, timeout: float = 6.0):
+    """Return (dns_ok, https_ok, detail) without printing any credential."""
+    try:
+        socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except Exception as exc:
+        return False, False, f"{type(exc).__name__}: {exc}"
+    try:
+        raw = socket.create_connection((host, port), timeout=timeout)
+        if port == 443:
+            ctx = ssl.create_default_context()
+            with ctx.wrap_socket(raw, server_hostname=host):
+                pass
+        else:
+            raw.close()
+        return True, True, ""
+    except Exception as exc:
+        return True, False, f"{type(exc).__name__}: {exc}"
+
+
+def _doctor_full(cfg, *, which=None, client=None, net_check=None,
+                 disk_usage=None, tmpdir=None, termux_ok=None, out=print) -> int:
+    """F13: deep environment check. Never prints the API key."""
+    from urllib.parse import urlsplit
+
+    which = which or shutil.which
+    ok = True
+
+    def chk(label, cond, hint="", soft=False):
+        nonlocal ok
+        mark = "ok  " if cond else ("warn" if soft else "FAIL")
+        line = f"[{mark}] {label}"
+        if not cond and hint:
+            line += f"  -> {hint}"
+        out(line)
+        if not soft:
+            ok = ok and bool(cond)
+
+    py = "%d.%d.%d" % tuple(sys.version_info[:3])
+    chk(f"python {py} (>= 3.11)", sys.version_info >= (3, 11), "pkg install python")
+    for label, exe, hint in (
+            ("tmux", "tmux", "pkg install tmux"),
+            ("git", "git", "pkg install git"),
+            ("ripgrep (rg)", "rg", "pkg install ripgrep")):
+        chk(f"{label}", bool(which(exe)), hint)
+    chk("jq (optional)", bool(which("jq")), "pkg install jq", soft=True)
+    t_ok = _termux_ok() if termux_ok is None else bool(termux_ok())
+    chk("termux-api", t_ok, "pkg install termux-api + Termux:API app")
+
+    du = disk_usage or shutil.disk_usage
+    try:
+        free_mb = int(du(str(Path.cwd())).free // (1024 * 1024))
+        chk(f"disk space ({free_mb} MB free)", free_mb >= 200,
+            "free some space under the workdir")
+    except Exception as exc:
+        chk("disk space", False, f"{type(exc).__name__}: {exc}")
+
+    tmp = tmpdir or os.environ.get("TMPDIR") or tempfile.gettempdir()
+    try:
+        fd, probe = tempfile.mkstemp(prefix="hydra-doctor-", dir=tmp)
+        os.close(fd)
+        os.unlink(probe)
+        chk(f"$TMPDIR writable ({tmp})", True)
+    except Exception as exc:
+        chk(f"$TMPDIR writable ({tmp})", False, f"{type(exc).__name__}: {exc}")
+
+    host_url = str(C.get(cfg, "api.host", "https://ollama.com"))
+    parts = urlsplit(host_url if "://" in host_url else "https://" + host_url)
+    host = parts.hostname or host_url
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    dns_ok, https_ok, detail = (net_check or _net_check)(host, port)
+    chk(f"DNS {host}", dns_ok, detail)
+    chk(f"HTTPS reachable ({host}:{port})", https_ok, detail)
+
+    key = C.load_key(cfg)
+    models = []
+    if key or client is not None:
+        cli, made = client, client is None
+        if cli is None:
+            from .client import OllamaCloud
+            cli = OllamaCloud(host, key, C.get(cfg, "api.connect_timeout", 15) or 15,
+                              C.get(cfg, "api.idle_timeout", 90) or 90)
+        try:
+            tags = cli.tags()
+            for t in tags or []:
+                name = t.get("name") or t.get("model") if isinstance(t, dict) else t
+                if name:
+                    models.append(str(name))
+            chk(f"API key valid (GET /api/tags, {len(models)} models)", True)
+        except Exception as exc:
+            status = getattr(exc, "status", None)
+            extra = f"HTTP {status}" if status else type(exc).__name__
+            chk("API key valid (GET /api/tags)", False, extra)
+        finally:
+            if made:
+                try:
+                    cli.close()
+                except Exception:
+                    pass
+    else:
+        chk("Ollama API key", False,
+            "echo your_key > ~/.hydra/key && chmod 600 ~/.hydra/key")
+    out("free models: " + (", ".join(models) if models else "(none/unknown)"))
+    out("\ndoctor --full: " + ("all good" if ok else "fix the FAIL lines above"))
+    return 0 if ok else 1
+
+
 def cmd_doctor(cfg, args=None) -> int:
     from .client import OllamaCloud
     args = list(args or [])
+    if "--full" in args:
+        return _doctor_full(cfg)
     if "--caps" in args or "--limits" in args:
         code = 0
         if "--caps" in args:
