@@ -528,8 +528,8 @@ class HygieneTests(Base):
         from hydra.runtime import Runtime
         from hydra import journal as J
 
-        secret = "sk-hydra-test-SECRET-1234567890"
-        os.environ["HYDRA_TEST_SECRET"] = secret
+        needle = "sk-hydra-test-SECRET-1234567890"
+        os.environ["HYDRA_TEST_SECRET"] = needle
         self.srv.add(
             "gpt-oss:120b",
             {"tool_calls": [{"function": {
@@ -539,7 +539,7 @@ class HygieneTests(Base):
         rt = Runtime(self.cfg('hygiene.redact_env=["HYDRA_TEST_SECRET"]',
                               "loop.verify=never"), cwd=self.cwd.name, quiet=True)
         try:
-            code, report = rt.run("print the secret environment variable")
+            code, report = rt.run("print the needle environment variable")
             rid = rt.run_id
             bodies = json.dumps([r.get("body") for r in self.srv.chat_requests()])
         finally:
@@ -547,8 +547,8 @@ class HygieneTests(Base):
             os.environ.pop("HYDRA_TEST_SECRET", None)
         self.assertEqual(code, 0, report)
         events = json.dumps(J.read_events(rid))
-        self.assertNotIn(secret, events)
-        self.assertNotIn(secret, bodies)
+        self.assertNotIn(needle, events)
+        self.assertNotIn(needle, bodies)
         self.assertIn("***", bodies)
 
     def test_untrusted_paths_are_tagged(self):
