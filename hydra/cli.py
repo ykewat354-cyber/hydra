@@ -26,7 +26,7 @@ from .client import CallCancelled
 
 COMMANDS = {"run", "resume", "ls", "tail", "tree", "usage", "doctor", "kill",
             "models", "undo", "init", "map", "eval", "daemon", "schedule",
-            "help", "version"}
+            "report", "help", "version"}
 
 HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud).
 
@@ -46,6 +46,7 @@ commands:
   ls                    list runs
   tail [RUN] [-a AGENT]  recent events of a run
   tree [RUN]            agent tree with status and tokens
+  report [RUN|--last]   paste-friendly run summary (--json --full --since 2h --timeline)
   usage [RUN]           token ledger + cost estimate (all runs if omitted)
   models probe|ls|pin   discover models your key can use
   daemon [--once]       run *.md task files dropped in ~/.hydra/queue/
@@ -64,6 +65,7 @@ flags:
   --max-inflight N      LLM gate slots
   --continue            resume the last run started in this cwd
   --plain / --no-tui    no full-screen UI; compact stream (auto when piped)
+  --debug-http          append runs/<id>/http.jsonl (or HYDRA_DEBUG_HTTP=1)
   -v / --verbose        show full tool arguments/results in plain mode
   --quiet  --json  --wait-reset
 """
@@ -98,6 +100,7 @@ class Opts:
         self.interactive = False
         self.plain = False
         self.verbose = False
+        self.debug_http = False
 
 
 def _parse(argv):
@@ -128,6 +131,8 @@ def _parse(argv):
             o.max_inflight = argv[i]
         elif a == "--wait-reset":
             o.wait_reset = True
+        elif a == "--debug-http":
+            o.debug_http = True
         elif a == "--detach":
             o.detach = True
         elif a == "--continue":
@@ -166,6 +171,8 @@ def main(argv=None) -> int:
         overrides.append(f"api.max_inflight={o.max_inflight}")
     if o.wait_reset:
         overrides.append("park.wait_reset=true")
+    if o.debug_http:
+        overrides.append("api.debug_http=true")
     cfg = C.load_config(overrides=overrides)
 
     if o.interactive:
@@ -192,6 +199,9 @@ def main(argv=None) -> int:
         return cmd_tail(rest[1:])
     if cmd == "tree":
         return cmd_tree(rest[1:])
+    if cmd == "report":
+        from . import report as R
+        return R.cli(cfg, rest[1:], json_out=o.json_out)
     if cmd == "kill":
         return cmd_kill(rest[1:])
     if cmd == "models":
@@ -526,6 +536,8 @@ def _spawn_detached(cfg, task, o) -> int:
         args += ["--quiet"]
     if o.wait_reset:
         args += ["--wait-reset"]
+    if o.debug_http:
+        args += ["--debug-http"]
     cmd = [sys.executable, "-m", "hydra"] + args + [task]
     env = dict(os.environ)
     env["HYDRA_DETACHED"] = "1"

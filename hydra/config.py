@@ -23,6 +23,7 @@ DEFAULTS: dict = {
         "connect_timeout": 15,
         "idle_timeout": 90,           # seconds without a streamed byte = stalled
         "retries": 5,
+        "debug_http": False,          # --debug-http / HYDRA_DEBUG_HTTP=1
     },
     "loop": {
         "max_turns": 0,               # 0 = unlimited
@@ -123,6 +124,7 @@ max_inflight    = 0               # 0 = derive from plan
 connect_timeout = 15
 idle_timeout    = 90
 retries         = 5
+debug_http      = false           # --debug-http / HYDRA_DEBUG_HTTP=1 -> runs/<id>/http.jsonl
 
 [loop]
 max_turns       = 0               # 0 = unlimited

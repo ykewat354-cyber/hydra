@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
+from . import httpdebug
+
 
 # ---------------------------------------------------------------- results
 
@@ -129,6 +131,7 @@ class OllamaCloud:
         self.idle_timeout = float(idle_timeout)
         self.cancel_event = None  # set by Runtime: a threading.Event (SIGINT)
         self.redact = None        # set by Runtime: fn(str)->str (secret hygiene)
+        self.http_log = None      # set by Runtime (F4 --debug-http): HttpLogger
 
     # -------------------------------------------------- plumbing
     def _connect(self):
@@ -149,22 +152,53 @@ class OllamaCloud:
 
     def _json_request(self, method: str, path: str, payload=None) -> dict:
         conn = self._connect()
+        started = time.time()
+        status, ttfb, req_bytes, resp_bytes = 0, None, 0, 0
+        headers, error_body, got_resp = None, None, False
         try:
             body = json.dumps(payload).encode() if payload is not None else None
+            req_bytes = len(body or b"")
             conn.request(method, path, body, self._headers())
             resp = conn.getresponse()
+            got_resp = True
+            status = resp.status
+            ttfb = int((time.time() - started) * 1000)
+            headers = httpdebug.pick_headers(resp)
             raw = resp.read().decode("utf-8", "replace")
+            resp_bytes = len(raw.encode("utf-8", "replace"))
+            if self.redact is not None:
+                raw = self.redact(raw)  # a server echo must not reach tracebacks
             if resp.status >= 400:
+                error_body = raw
                 raise classify(resp.status, raw, "api")
             try:
                 return json.loads(raw or "{}")
             except json.JSONDecodeError:
                 return {}
         finally:
+            if got_resp:
+                self._log_http(method, path, "", status, started, ttfb, req_bytes,
+                               resp_bytes, headers, error_body=error_body)
             try:
                 conn.close()
             except Exception:
                 pass
+
+    def _log_http(self, method, path, model, status, started, ttfb, req_bytes,
+                  resp_bytes, headers, think=None, format=None, prefix=None,
+                  error_body=None) -> None:
+        """F4: append one record when --debug-http is on; never raise."""
+        if self.http_log is None:
+            return
+        try:
+            self.http_log.write(
+                method, path, model, status=status,
+                latency_ms=max(0, int((time.time() - started) * 1000)),
+                ttfb_ms=ttfb, request_bytes=req_bytes,
+                response_bytes=resp_bytes, headers=headers, think=think,
+                format=format, prefix=prefix, error_body=error_body)
+        except Exception:
+            pass
 
     # -------------------------------------------------- chat
     def chat(self, model: str, messages: list, tools=None, think=None,
@@ -183,14 +217,27 @@ class OllamaCloud:
 
         conn = self._connect()
         started = time.time()
+        prefix = httpdebug.prefix_hash(messages, tools) if self.http_log is not None else None
+        status, ttfb, req_bytes, resp_bytes = 0, None, 0, 0
+        headers, error_body, got_resp = None, None, False
         try:
             body = json.dumps(payload)
             if self.redact is not None:
                 body = self.redact(body)  # nothing leaves for a model un-redacted
-            conn.request("POST", "/api/chat", body.encode(), self._headers())
+            body = body.encode()
+            req_bytes = len(body)
+            conn.request("POST", "/api/chat", body, self._headers())
             resp = conn.getresponse()
+            got_resp = True
+            status = resp.status
+            ttfb = int((time.time() - started) * 1000)
+            headers = httpdebug.pick_headers(resp)
             if resp.status >= 400:
                 raw = resp.read().decode("utf-8", "replace")
+                resp_bytes = len(raw.encode("utf-8", "replace"))
+                if self.redact is not None:
+                    raw = self.redact(raw)  # a server echo must not reach tracebacks
+                error_body = raw
                 retry_after = None
                 ra = resp.getheader("Retry-After")
                 if ra:
@@ -201,7 +248,9 @@ class OllamaCloud:
                 raise classify(resp.status, raw, model, retry_after)
 
             if not stream:
-                raw = resp.read().decode("utf-8", "replace")
+                raw_bytes = resp.read()
+                resp_bytes = len(raw_bytes)
+                raw = raw_bytes.decode("utf-8", "replace")
                 data = json.loads(raw or "{}")
                 msg = data.get("message") or {}
                 reply = Reply(
@@ -236,6 +285,7 @@ class OllamaCloud:
                     raise StreamStalled("connection lost mid-stream") from exc
                 if not line:
                     break
+                resp_bytes += len(line)
                 line = line.strip()
                 if not line:
                     continue
@@ -271,6 +321,11 @@ class OllamaCloud:
                 raise StreamStalled("stream ended before the done chunk")
             return reply
         finally:
+            if got_resp:
+                self._log_http("POST", "/api/chat", model, status, started, ttfb,
+                               req_bytes, resp_bytes, headers, think=think,
+                               format=format, prefix=prefix,
+                               error_body=error_body)
             try:
                 conn.close()
             except Exception:

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from . import config as C
+from . import httpdebug
 from . import hygiene
 from . import journal as J
 from .agent import Agent, build_env_block, load_system_prompt
@@ -30,6 +31,7 @@ class Runtime:
         self.json_out = json_out
         self.prices = C.load_prices(cfg)
         self.redact = hygiene.make_redactor(cfg)
+        self.debug_http = httpdebug.enabled(cfg)   # F4 --debug-http / env var
         key = C.load_key(cfg) or ""
         self.client = OllamaCloud(
             C.get(cfg, "api.host", "https://ollama.com"), key,
@@ -111,6 +113,16 @@ class Runtime:
                 pass
 
     # -------------------------------------------------- run lifecycle
+    def _attach_http_log(self) -> None:
+        """F4: start appending runs/<id>/http.jsonl for this run (if enabled)."""
+        if not self.debug_http or not self.run_id:
+            return
+        try:
+            self.client.http_log = httpdebug.HttpLogger(
+                C.run_dir(self.run_id) / "http.jsonl", redact=self.redact)
+        except Exception:
+            self.client.http_log = None
+
     def _setup_agent(self, agent: Agent) -> Agent:
         agent.journal = self.journal
         agent.runtime = self
@@ -120,6 +132,7 @@ class Runtime:
         self.run_id = J.new_run_id()
         self.journal = J.Journal(self.run_id, self.cfg, sink=self.ui.event,
                                  redact=self.redact)
+        self._attach_http_log()
         self.router.journal = self.journal
         self.env_block = build_env_block(self.cwd, self.cfg, role="lead")
         if lead_model:
@@ -153,6 +166,7 @@ class Runtime:
         self.run_id = rid
         self.journal = J.Journal(rid, self.cfg, sink=self.ui.event,
                                  redact=self.redact, seq0=len(events))
+        self._attach_http_log()
         self.router.journal = self.journal
         self.cwd = Path(data.get("cwd") or self.cwd)
         self.env_block = build_env_block(self.cwd, self.cfg, role="lead")
