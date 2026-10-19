@@ -85,6 +85,23 @@ class ThreeModelBase(Base):
 
 
 class RouterModelTests(ThreeModelBase):
+    def test_lead_hint_attempted_first_and_marked_missing(self):
+        """--lead must actually be tried (and marked) before fallbacks."""
+        from hydra.runtime import Runtime
+
+        self.srv.add("no-such-model:1b",
+                     {"status": 404, "body": {"error": "model not found"}})
+        self.srv.add("gpt-oss:120b", {"content": "ok", **finish_node("fell back")})
+        rt = Runtime(self.cfg("loop.verify=never"), cwd=self.cwd.name, quiet=True)
+        try:
+            code, report = rt.run("say ok", lead_model="no-such-model:1b")
+        finally:
+            rt.close()
+        self.assertEqual(code, 0, report)
+        self.assertEqual(self.srv.seen_models[0], "no-such-model:1b")
+        self.assertIn("gpt-oss:120b", self.srv.seen_models)
+        self.assertEqual(rt.registry.status_of("no-such-model:1b"), "missing")
+
     def test_402_failover_marks_paid(self):
         from hydra.runtime import Runtime
 

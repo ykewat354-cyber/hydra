@@ -228,6 +228,11 @@ class Runtime:
         lead = Agent("a0", "lead", task, self.cfg, workdir=self.cwd,
                      system_prompt=load_system_prompt("lead"),
                      env_block=self.env_block)
+        if lead_model:
+            # Make --lead a real hint: router fallback ranking sorts unknown
+            # models last, so without this a bad lead is never attempted (and
+            # never marked missing). Paid leads are still pruned + failed over.
+            lead.model_override = lead_model
         self._setup_agent(lead)
         self.agents = {lead.id: lead}
         self.swarm = Swarm(self)
