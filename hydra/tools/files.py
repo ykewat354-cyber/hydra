@@ -21,10 +21,32 @@ def _resolve(ctx, raw) -> Path:
     return p
 
 
+def _binary_reason(path: Path):
+    """Cheap sniff: NUL bytes or many control bytes in the first 8 KiB."""
+    try:
+        with path.open("rb") as fh:
+            chunk = fh.read(8192)
+    except OSError:
+        return None
+    if not chunk:
+        return None
+    if b"\x00" in chunk:
+        return "NUL bytes in the first 8 KiB"
+    allowed = set(range(0x20, 0x7f)) | {0x09, 0x0a, 0x0d, 0x0c, 0x08, 0x1b}
+    control = sum(1 for b in chunk if b < 0x20 and b not in allowed)
+    if control > len(chunk) * 0.3:
+        return f"{control * 100 // len(chunk)}% control bytes in the first 8 KiB"
+    return None
+
+
 def _tool_read_file(args, ctx) -> str:
     path = _resolve(ctx, args.get("path"))
     if not path.is_file():
         return f"ERROR: not a file: {path}"
+    why = _binary_reason(path)
+    if why:
+        return (f"ERROR: {path} looks like a binary file ({why}); read_file only "
+                f"reads text. Use bash (`file`, `xxd`, `strings`) to inspect it.")
     start = max(1, int(args.get("start") or 1))
     end = args.get("end")
     end = int(end) if end else start + 199

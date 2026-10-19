@@ -170,6 +170,7 @@ def _background(ctx, cwd: Path, cmd: str) -> str:
     logdir = (rt.journal.dir / "jobs") if rt.journal else (Path(tempfile.gettempdir()) / "hydra-jobs")
     logdir.mkdir(parents=True, exist_ok=True)
     log = logdir / f"{jid}.log"
+    fh = None
     try:
         fh = open(log, "ab")
         proc = subprocess.Popen(
@@ -178,6 +179,12 @@ def _background(ctx, cwd: Path, cmd: str) -> str:
             start_new_session=True)
     except Exception as exc:
         return f"ERROR: could not start background job: {exc}"
+    finally:
+        if fh is not None:  # the child holds its own dup of the fd
+            try:
+                fh.close()
+            except Exception:
+                pass
     rt.jobs[jid] = {"proc": proc, "log": log, "cmd": cmd, "started": time.time(),
                     "agent": ctx.agent.id}
     return f"started job {jid} (pid {proc.pid}); log: {log}"
