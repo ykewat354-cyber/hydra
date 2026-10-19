@@ -200,6 +200,9 @@ class LanguageRuleTests(unittest.TestCase):
                          "language logic must stay static in prompts/*.md")
         lead = (HYDRA / "prompts" / "lead.md").read_text(encoding="utf-8")
         self.assertIn("Reply in the same language and script as the user.", lead)
+        # The three scripts are spelled out so a model cannot default to Hinglish.
+        self.assertIn("Devanagari message gets a Devanagari reply", lead)
+        self.assertIn("English message gets an English reply", lead)
 
 
 if __name__ == "__main__":
