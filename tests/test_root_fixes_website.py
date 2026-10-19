@@ -58,6 +58,18 @@ class WorkspaceContextTests(_HomeCase):
         self.assertIn("assets/", text)
         self.assertIn("css/", text)
 
+    def test_most_recently_touched_project_is_listed(self):
+        for name in ("old1", "old2", "old3", "old4", "old5", "old6"):
+            d = Path(self.cwd.name) / name
+            d.mkdir()
+            (d / "index.html").write_text("<html></html>", encoding="utf-8")
+            os.utime(d, (100, 100))
+        d = Path(self.cwd.name) / "gym_website"
+        d.mkdir()
+        (d / "index.html").write_text("<html></html>", encoding="utf-8")
+        text = project_mod.workspace_summary(self.cwd.name)
+        self.assertIn("- gym_website/:", text)
+
     def test_heavy_and_sensitive_names_are_not_listed(self):
         (Path(self.cwd.name) / "app").mkdir()
         (Path(self.cwd.name) / "app" / "index.html").write_text(

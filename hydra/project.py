@@ -254,12 +254,19 @@ def workspace_summary(cwd, cfg=None) -> str:
         return ""
     lines = ["# Workspace (cwd)", "entries: " + " ".join(names)]
     plimit = int(C.get(cfg, "project.workspace_projects", 5) or 5) if cfg else 5
+
+    def _mtime(e):
+        try:
+            return float(e.stat(follow_symlinks=False).st_mtime)
+        except Exception:
+            return 0.0
+
     projects = []
-    for e in entries:
+    # The user's current project is usually the most recently touched one;
+    # alphabetical order would hide it behind old repos in $HOME.
+    for e in sorted((x for x in entries if _is_dir(x)), key=_mtime, reverse=True):
         if len(projects) >= plimit:
             break
-        if not _is_dir(e):
-            continue
         facts = _project_facts(Path(e.path))
         if facts:
             projects.append(f"- {e.name}/: " + ", ".join(facts))
