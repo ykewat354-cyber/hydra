@@ -45,10 +45,14 @@ def run_agent(agent, rt) -> dict:
                 agent.turns += 1
 
                 try:
+                    cb = getattr(rt.ui, "delta", None)
+                    on_delta = ((lambda kind, text: cb(agent.id, kind, text))
+                                if callable(cb) else None)
                     reply = rt.router.chat(
                         messages=agent.api_messages(), role=agent.role,
                         tools=rt.tools.schemas_for(agent), think=agent.think,
-                        agent=agent, exclude=tuple(agent.exclude_models))
+                        agent=agent, exclude=tuple(agent.exclude_models),
+                        on_delta=on_delta)
                 except ContextOverflow:
                     if not agent.compact(rt):
                         raise
@@ -64,6 +68,14 @@ def run_agent(agent, rt) -> dict:
                         from_text = True
                 agent.append(reply.as_message())
                 agent.data["last_model"] = getattr(reply, "model", None)
+                # the actual answer must be visible in the UI / journal; before
+                # this event the CLI only ever showed tool noise and a summary.
+                if rt.journal and (reply.content or "").strip():
+                    rt.journal.event(
+                        "assistant", agent.id, text=reply.content[:50000],
+                        chars=len(reply.content),
+                        model=getattr(reply, "model", None),
+                        ms=getattr(reply, "ms", None))
                 if from_text and rt.journal:
                     rt.journal.event("parsed_from_text", agent.id, n=len(calls))
 

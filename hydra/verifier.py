@@ -10,8 +10,12 @@ verifier crash is reported but not fatal.
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 from . import config as C
 from .agent import load_prompt, parse_json_blob
+from .ui_format import issue_text, short as _short
 
 # §19.10 structured output: tool-less verifier calls use a JSON schema.
 VERDICT_SCHEMA = {
@@ -34,7 +38,17 @@ def should_verify(cfg: dict, agent) -> bool:
     if mode == "always":
         return True
     rep = agent.report or {}
-    return bool(rep.get("files_changed")) or bool(agent.data.get("acceptance"))
+    if rep.get("files_changed") or rep.get("artifacts"):
+        return True
+    if agent.data.get("acceptance"):
+        return True
+    # Research/report/list tasks must be checked even when the agent forgot to
+    # write a file: that is exactly the failure the verifier has to catch.
+    task = str(getattr(agent, "task", "") or "").lower()
+    research = ("research", "survey", "landscape", "comparison",
+                "deep dive", "list", "projects", "resources",
+                "options", "market", "top 10", "top 20", "100", "200")
+    return any(w in task for w in research)
 
 
 def _pick_model(rt, producer_model):
@@ -46,15 +60,38 @@ def _pick_model(rt, producer_model):
     return chain[0] if chain else None
 
 
+def _artifact_stats(text: str) -> str:
+    """Structural facts the reviewer can use without reading the whole file."""
+    lines = text.splitlines()
+    numbered = [re.sub(r"^\s*\d+[.)]\s*", "", ln).strip()
+                for ln in lines if re.match(r"^\s*\d+[.)]\s+", ln)]
+    bullets = [re.sub(r"^\s*[-*+]\s+", "", ln).strip()
+               for ln in lines if re.match(r"^\s*[-*+]\s+", ln)]
+    items = numbered or bullets
+    bits = [f"{len(lines)} lines", f"{len(text)} chars"]
+    if numbered:
+        bits.append(f"{len(numbered)} numbered items")
+    elif bullets:
+        bits.append(f"{len(bullets)} bullet items")
+    if items:
+        norm = [re.sub(r"[^a-z0-9]+", " ", x.lower()).strip() for x in items]
+        uniq = len({x for x in norm if x})
+        bits.append(f"{uniq} unique")
+        if uniq < len(norm):
+            seen, dup = set(), []
+            for original, key in zip(items, norm):
+                if key and key in seen and len(dup) < 3:
+                    dup.append(original)
+                seen.add(key)
+            if dup:
+                bits.append("duplicates: " + " | ".join(_short(x, 60) for x in dup))
+    return " · ".join(bits)
+
+
 def _issue_text(issues) -> str:
     out = []
     for it in issues or []:
-        if isinstance(it, dict):
-            what = str(it.get("what") or it.get("issue") or it)
-            fix = str(it.get("fix") or "").strip()
-            out.append(f"- {what}" + (f" (fix: {fix})" if fix else ""))
-        else:
-            out.append(f"- {it}")
+        out.append("- " + issue_text(it))
     return "\n".join(out)
 
 
@@ -79,6 +116,33 @@ def check(rt, agent) -> dict:
         if len(evidence) >= 6:
             break
     evidence.reverse()
+
+    # The reviewer cannot read files itself (tool-less JSON call). Include a
+    # bounded excerpt of the actual deliverables so a claimed list/report is
+    # checked instead of trusted.
+    artifact_evidence, seen = [], set()
+    paths = list(rep.get("artifacts") or []) + list(rep.get("files_changed") or [])
+    for rel in paths:
+        try:
+            p = Path(str(rel))
+            if not p.is_absolute():
+                p = Path(agent.workdir) / p
+            p = p.resolve()
+            if p in seen or not p.is_file():
+                continue
+            seen.add(p)
+            text = p.read_text(encoding="utf-8", errors="replace")
+            stats = _artifact_stats(text)
+            if len(text) > 3000:
+                excerpt = text[:2000] + "\n[... middle omitted ...]\n" + text[-1000:]
+            else:
+                excerpt = text
+            artifact_evidence.append(f"[file {rel} · {stats}]\n" + excerpt)
+        except Exception:
+            continue
+        if len(artifact_evidence) >= 3:
+            break
+
     claim = (
         f"TASK:\n{agent.task[:1500]}\n\n"
         f"FINAL SUMMARY:\n{str(rep.get('summary') or '')[:1500]}\n\n"
@@ -86,6 +150,8 @@ def check(rt, agent) -> dict:
         "\n\nCOMMANDS RUN:\n" + "\n".join(rep.get("commands_run") or ["(none)"]) +
         "\n\nOPEN ISSUES:\n" + "\n".join(rep.get("open_issues") or ["(none)"]) +
         "\n\nARTIFACTS:\n" + str(rep.get("artifacts") or "(none)")[:2000] +
+        "\n\nARTIFACT CONTENTS (read from disk; a summary is not a deliverable):\n" +
+        ("\n\n".join(artifact_evidence) or "(none readable)") +
         "\n\nEVIDENCE (recent tool calls with outputs, oldest first):\n" +
         ("\n\n".join(evidence) or "(none)"))
     prompt = base + "\n\n" + claim
@@ -110,8 +176,15 @@ def check(rt, agent) -> dict:
             issues = obj.get("issues") or []
     if rt.journal:
         try:
+            clean = []
+            for i in (issues or [])[:10]:
+                if isinstance(i, dict):
+                    clean.append({"what": str(i.get("what") or i)[:300],
+                                  "fix": str(i.get("fix") or "")[:300]})
+                else:
+                    clean.append(str(i)[:300])
             rt.journal.event("verify", agent.id, verdict=verdict, model=reply.model,
-                             issues=[str(i)[:300] for i in issues][:10])
+                             issues=clean)
         except Exception:
             pass
     return {"verdict": verdict, "issues": issues, "model": reply.model,

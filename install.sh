@@ -16,6 +16,7 @@ echo "hydra installed -> $LAUNCHER"
 echo "repo: $DIR"
 echo
 echo "next:"
+echo "  hydra                 # open the full-screen TUI"
 echo "  hydra doctor          # environment checks"
 echo "  hydra models probe    # discover which models your key can use"
 echo "  hydra \"your task\"     # autonomous run"

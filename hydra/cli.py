@@ -30,10 +30,16 @@ COMMANDS = {"run", "resume", "ls", "tail", "tree", "usage", "doctor", "kill",
 
 HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud).
 
-usage:  hydra [flags] "task"        start an autonomous run
-        hydra -i                    interactive REPL (steer anytime)
+usage:  hydra                       open the full-screen TUI (works from any folder)
+        hydra "task"                open the TUI with a task already running
+        hydra -i                    same TUI (interactive)
+        hydra --plain "task"        compact stream in this terminal (scripts)
         hydra --detach "task"       tmux/new-session, survives closing Termux
         hydra <command> [args]
+
+The TUI: assistant text streams live, tool calls collapse to one line
+(Ctrl-T expands), the composer stays open for steering, and /help lists
+commands. Ctrl-C cancels the in-flight call; press twice to stop the run.
 
 commands:
   resume [RUN|NAME]     continue a killed / parked / interrupted run
@@ -57,6 +63,8 @@ flags:
   --name NAME           name this run
   --max-inflight N      LLM gate slots
   --continue            resume the last run started in this cwd
+  --plain / --no-tui    no full-screen UI; compact stream (auto when piped)
+  -v / --verbose        show full tool arguments/results in plain mode
   --quiet  --json  --wait-reset
 """
 
@@ -88,6 +96,8 @@ class Opts:
         self.detach = False
         self.continue_ = False
         self.interactive = False
+        self.plain = False
+        self.verbose = False
 
 
 def _parse(argv):
@@ -124,6 +134,10 @@ def _parse(argv):
             o.continue_ = True
         elif a in ("-i", "--interactive"):
             o.interactive = True
+        elif a in ("--plain", "--no-tui"):
+            o.plain = True
+        elif a in ("-v", "--verbose"):
+            o.verbose = True
         elif a in ("--version", "-V"):
             return o, ["version"]
         elif a in ("--help", "-h"):
@@ -155,15 +169,17 @@ def main(argv=None) -> int:
     cfg = C.load_config(overrides=overrides)
 
     if o.interactive:
-        return cmd_repl(cfg, o)
+        return cmd_tui(cfg, o, " ".join(rest))
     if o.continue_:
         return cmd_resume(cfg, [], o)
     if rest and rest[0] == "version":
         print(f"hydra {__version__}")
         return 0
-    if not rest or rest[0] == "help":
+    if rest and rest[0] == "help":
         print(HELP)
         return 0
+    if not rest:
+        return cmd_tui(cfg, o)
     cmd = rest[0] if rest[0] in COMMANDS else None
 
     if cmd == "doctor":
@@ -202,8 +218,7 @@ def main(argv=None) -> int:
 
     task = " ".join(rest)
     if not task.strip():
-        print(HELP)
-        return 0
+        return cmd_tui(cfg, o)
     if task.startswith("/"):
         from .project import find_commands, render_command
         head, _, args = task[1:].partition(" ")
@@ -214,7 +229,42 @@ def main(argv=None) -> int:
             print(f"hydra: unknown command /{head} — "
                   f"available: {', '.join('/' + c for c in sorted(cmds)) or '(none)'}")
             return 2
+    # Same one-shot run, but with the readable TUI when a real terminal is
+    # attached. Pipes, scripts and --plain keep the line stream.
+    if (_tui_ok(o) and not o.detach and not o.continue_):
+        return cmd_tui(cfg, o, task)
     return cmd_run(cfg, task, o)
+
+
+def _tui_ok(o) -> bool:
+    if o.plain or o.quiet or o.json_out:
+        return False
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def cmd_tui(cfg, o, initial: str = "") -> int:
+    """Full-screen UI; falls back to the compact stream when unavailable."""
+    if not _key_preflight(cfg):
+        return 2
+    if not _tui_ok(o):
+        if initial:
+            return cmd_run(cfg, initial, o)
+        if o.interactive:
+            return cmd_repl(cfg, o)  # pipes/scripts keep the old REPL
+        print(HELP)
+        return 0
+    try:
+        from .tui_app import run_tui
+        return run_tui(cfg, o, initial=initial)
+    except Exception as exc:
+        print(f"\nhydra: TUI unavailable ({type(exc).__name__}: {exc}); "
+              "falling back to the compact stream.\n")
+        if initial:
+            return cmd_run(cfg, initial, o)
+        return cmd_repl(cfg, o)
 
 
 # ------------------------------------------------------------------ run
@@ -242,7 +292,8 @@ def cmd_run(cfg, task, o) -> int:
         return _spawn_detached(cfg, task, o)
     from .runtime import Runtime
     from . import mentions
-    rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
+    rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out,
+                 verbose=getattr(o, "verbose", False))
     task = mentions.expand(cfg, task, os.getcwd(), rt.client)
     rt.wake_lock()
     restore = _install_signals(rt)
@@ -494,7 +545,8 @@ def cmd_resume(cfg, args, o) -> int:
         return 2
     from .runtime import Runtime
     which = args[0] if args else None
-    rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
+    rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out,
+                 verbose=getattr(o, "verbose", False))
     rt.wake_lock()
     code, report = 1, {}
     try:
@@ -521,7 +573,8 @@ def _footer(rt, report, code) -> None:
                           "est_usd": round(tot["est_usd"], 6)}, ensure_ascii=False))
         return
     summary = (report or {}).get("summary")
-    if summary and not rt.ui.quiet:
+    if (summary and not rt.ui.quiet and not getattr(rt.ui, "json_out", False)
+            and not getattr(rt.ui, "printed_report", False)):
         print("\n" + summary.strip())
     print(f"\n{status} · {turns} turns · {len(rt.agents)} agents · "
           f"{tot['in'] // 1000}k in / {tot['out'] // 1000}k out · "
@@ -537,7 +590,8 @@ def cmd_repl(cfg, o) -> int:
     if not _key_preflight(cfg):
         return 2
     from .runtime import Runtime
-    rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out)
+    rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out,
+                 verbose=getattr(o, "verbose", False))
     rt.wake_lock()
     restore = _install_signals(rt)
     code, report = 1, {}

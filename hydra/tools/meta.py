@@ -29,6 +29,12 @@ def _tool_todo(args, ctx):
     if not isinstance(items, list):
         return "ERROR: items must be a list of strings ('x ...' marks a done item)"
     ctx.agent.data["todos"] = [str(i) for i in items]
+    if ctx.journal:
+        try:
+            ctx.journal.event("todos", ctx.agent.id,
+                              items=[str(i) for i in items])
+        except Exception:
+            pass
     return _render_todos(ctx.agent)
 
 

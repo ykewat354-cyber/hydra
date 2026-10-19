@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.1).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 85 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits.
+> **Status: implemented (v1.1.0).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 122 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.1 adds the full-screen TUI, research deliverable enforcement, and a raw web-fetch fallback.
 
 ### Install (one line)
 
@@ -19,7 +19,7 @@ curl -fsSL https://raw.githubusercontent.com/ykewat354-cyber/hydra/main/install-
 ```
 
 That clones/updates `~/hydra`, installs `$PREFIX/bin/hydra`, and runs `hydra doctor`.
-Then: `hydra models probe` → `hydra "your task"`.
+Then: `hydra models probe` → `hydra` (opens the TUI) or `hydra "your task"`.
 
 **Contents:** [1 Hard constraints](#1-hard-constraints) · [2 Free-tier reality check](#2-free-tier-reality-check) · [3 Architecture](#3-architecture) · [4 Install](#4-install-termux) · [5 Agent loop](#5-the-agent-loop) · [6 Token economy](#6-context--token-economy) · [7 Models](#7-models--multi-model-calling) · [8 LLM gate](#8-the-llm-gate) · [9 Sub-agents](#9-sub-agents) · [10 Tools](#10-tools) · [11 Termux](#11-termux-integration) · [12 State & resume](#12-state-journal--resume) · [13 CLI](#13-cli) · [14 Config](#14-config) · [15 Prompts](#15-prompts) · [16 Troubleshooting](#16-troubleshooting) · [17 Build plan](#17-build-plan-for-the-implementing-ai) · [18 Non-goals](#18-non-goals) · [19 Extended features](#19-extended-features-v11)
 
@@ -94,7 +94,9 @@ hydra/
 ├── agent.py         # Agent state, context building, compaction, stall detector
 ├── swarm.py         # spawn/wait/kill, DAG scheduler, blackboard
 ├── journal.py       # JSONL events, fsync policy, resume
-├── tui.py           # phone-friendly status + stream rendering
+├── tui.py           # compact line renderer (pipes, --plain, scripts)
+├── tui_app.py       # full-screen terminal UI (no dependencies)
+├── ui_format.py     # shared width/wrapping/markdown/tool-summary helpers
 ├── tools/
 │   ├── __init__.py  # registry, schema export, plugin loader
 │   ├── shell.py     # bash, background jobs, python
@@ -474,7 +476,7 @@ All tools return **strings**, never raise, and are described to the model with O
 | `apply_patch` | `(patch)` | Unified diff via `git apply` / `patch` when present. |
 | `ls` / `glob` / `grep` | `(…)` | `grep` uses `rg` if installed, else a pure-Python fallback. |
 | `web_search` | `(query, max_results=5)` | `POST https://ollama.com/api/web_search` with the same Bearer key. Tolerate missing fields. |
-| `web_fetch` | `(url)` | `POST https://ollama.com/api/web_fetch`. Cap the text, spill the rest. |
+| `web_fetch` | `(url)` | `POST https://ollama.com/api/web_fetch`; if that endpoint fails, a stdlib `urllib` HTML→text fallback fetches the page directly. A missing page is reported as `page not found (HTTP 404)`, never as a model error. Cap the text, spill the rest. |
 | `http` | `(method, url, headers?, body?)` | Raw HTTP via `urllib` for non-Ollama endpoints. |
 | `termux_*` | `notify, toast, clipboard_get/set, battery, location, tts, vibrate, open_url, share, sms_send, call, camera_photo, wifi` | Thin wrappers over `termux-*` CLIs. Everything is *also* reachable via `bash`. |
 | `todo` | `(items[])` | Persisted plan tracker, shown on the status line. |
@@ -543,9 +545,12 @@ Types: `run_start · agent_spawn · model_request · model_response · tool_call
 ## 13. CLI
 
 ```
-hydra "task"                    autonomous run, streams progress
-hydra run task.md               task from a file
-hydra -i                        REPL; type anytime to steer (non-blocking)
+hydra                           full-screen TUI (works from any folder)
+hydra "task"                    open the TUI with the task already running
+hydra run task.md               task from a file (TUI when a terminal is attached)
+hydra -i                        same full-screen TUI (interactive)
+hydra --plain "task"            compact stream in this terminal (scripts/pipes)
+hydra --plain -i                the old line-based REPL (for pipes/scripts)
 hydra --detach "task"           tmux + wake-lock + notify on finish
 hydra resume [RUN_ID]           continue after a kill or park
 hydra ls                        list runs
@@ -563,24 +568,56 @@ hydra eval [SUITE] [--real]     run the regression tasks in evals/ (§19.11)
 hydra schedule add|ls|rm        recurring tasks (§19.8)
 ```
 
-Useful flags: `--lead MODEL` · `--max-inflight N` · `--notify` · `--quiet` · `--json` · `--wait-reset`.
+Useful flags: `--lead MODEL` · `--max-inflight N` · `--plain` / `--no-tui` · `-v` / `--verbose` · `--quiet` · `--json` · `--wait-reset`.
 
-**REPL steering** (every one is non-blocking, none is an approval): free text → lead's inbox at the next turn; `/tree` · `/kill aN` · `/model role=model` · `/pause` · `/resume` · `/note text`.
+### 13.1 Full-screen TUI
 
-**Target output:**
+`hydra` with no arguments opens the alternate-screen TUI. It is pure ANSI +
+`termios`; there is nothing to pip. Assistant prose streams live (markdown-lite,
+JSON-only replies are converted to readable fields, never dumped as braces), tool
+calls collapse to one line, and the composer stays open while the run continues.
 
 ```
-$ hydra "scrape the top 20 HN stories into hn.json and write summary.md"
-▶ r_1005_0932  lead=gpt-oss:120b  slots=1/free
-[a0 lead      ] todo 0/3  plan ready
-[a0 lead      ] ⚙ spawn_agent researcher "fetch + parse HN front page"   → a1
-[a1 researcher] ⚙ web_fetch news.ycombinator.com                  ✓ 7.9k chars
-[a1 researcher] ✔ report 212 tok
-[a0 lead      ] ⚙ write_file hn.json                              ✓
-[a0 lead      ] ⚙ spawn_agent scribe "summary.md from hn.json"    → a2 ✔
-[a3 reviewer  ] ⚙ bash python -c "import json;…"                  ✓
-✔ done · 14 turns · 4 agents · 41k in / 6k out · est $0.01 · 02:31
+ HYDRA  1.1.0                    r_1019_0133 ~/proj · gpt-oss:120b · $0.0015  ● ready
+ ❯ scrape the top 20 HN stories into hn.json and write summary.md
+ ● bash  python fetch_hn.py
+   ✓ 20 stories · 1.2s
+ I fetched 20 stories and am writing summary.md now.
 ```
+
+| Key | Action |
+|---|---|
+| `Enter` | submit a task (or steer the live run) |
+| `Tab` | complete a `/command` |
+| `↑` / `↓` | input history |
+| `PgUp` / `PgDn` | scroll the transcript (mouse wheel works where Termux sends it) |
+| `Ctrl-C` / `Esc` | cancel the in-flight call; the run stays alive |
+| `Ctrl-C` twice (running) | stop the run (the checkpoint stays resumable) |
+| `Ctrl-C` twice (idle) | leave the TUI |
+| `Ctrl-T` | toggle verbose tool arguments/results |
+| `Ctrl-L` | clear the screen |
+| `Ctrl-O` | copy the last answer/report to the clipboard |
+| `Ctrl-D` | quit when the composer is empty |
+
+Slash commands: `/help` · `/clear` · `/copy` · `/plan` · `/pause` · `/unpause` ·
+`/resume` · `/tree` · `/kill aN` · `/model role=model` · `/models` · `/cost` ·
+`/note text` · `/undo` · `/runs` · `/doctor` · `/init` · `/keys` · `/quit` ·
+`/verbose`. Custom project commands (`~/.hydra/commands/*.md`) also work.
+
+The layout is responsive: a right sidebar appears at ≥96 columns; below that the
+transcript uses the full width. The minimum usable width is 30 columns. Pipes,
+`--quiet`, `--json`, `--plain` and non-TTY contexts automatically keep the
+compact line stream, so scripts and `hydra daemon` never hang on a terminal.
+
+**Research deliverables.** For a research/list/comparison/report task, the lead is
+required to write the complete result to a file (default `RESEARCH.md`), list it
+in `files_changed`/`artifacts`, and check the requested count and uniqueness. The
+verifier receives bounded file excerpts and fails a finish that claims a list but
+leaves no readable file, contains duplicates/padding, or misses the requested
+coverage. A summary in chat is not accepted as the deliverable.
+
+**REPL steering** (also available in the plain REPL): free text → lead's inbox at
+the next turn; `/tree` · `/kill aN` · `/model role=model` · `/pause` · `/resume` · `/note text`.
 
 **Daemon:** drop a `*.md` task file into `~/.hydra/queue/`; the result is written to `queue/done/<name>.result.md`. This directory is the integration seam for any external bridge.
 

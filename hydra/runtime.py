@@ -22,7 +22,8 @@ from .tools import Executor, Registry
 
 
 class Runtime:
-    def __init__(self, cfg: dict, *, cwd=None, quiet=False, json_out=False):
+    def __init__(self, cfg: dict, *, cwd=None, quiet=False, json_out=False,
+                 verbose=False, ui=None):
         self.cfg = cfg
         self.cwd = Path(cwd or os.getcwd())
         self.quiet = quiet
@@ -43,8 +44,10 @@ class Runtime:
         self.router = Router(cfg, self.client, self.prices, gate=self.gate,
                              registry=self.registry)
 
-        from .tui import Tui
-        self.ui = Tui(quiet=quiet, json_out=json_out)
+        if ui is None:
+            from .tui import Tui
+            ui = Tui(quiet=quiet, json_out=json_out, verbose=verbose)
+        self.ui = ui
         self.journal = None
         self.run_id = None
         self.run_meta: dict = {}

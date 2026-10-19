@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -189,20 +190,23 @@ class Executor:
     def run(self, calls: list, agent) -> list:
         """Run calls (possibly in parallel), return tool messages in call order."""
         results = [None] * len(calls)
+        elapsed = [0] * len(calls)
         futures = {}
         for i, call in enumerate(calls):
             name = call["function"]["name"]
             args = call["function"]["arguments"]
             if self.rt.journal:
                 self.rt.journal.event("tool_call", agent.id, tool=name, args=args, idx=i)
-            futures[self._pool_for(name).submit(self._invoke, name, args, agent)] = i
+            futures[self._pool_for(name).submit(self._timed, name, args, agent)] = i
         for fut, i in futures.items():
             try:
-                results[i] = fut.result()
+                content, ms = fut.result()
+                results[i] = content
+                elapsed[i] = int(ms)
             except Exception as exc:  # never reachable; _invoke swallows
                 results[i] = f"ERROR: {type(exc).__name__}: {exc}"
         out = []
-        for call, content in zip(calls, results):
+        for i, (call, content) in enumerate(zip(calls, results)):
             name = call["function"]["name"]
             content = self._cap(content, agent, name)
             if self.rt.redact is not None:
@@ -211,9 +215,16 @@ class Executor:
                 content = self._wrap_untrusted(content, name)
             if self.rt.journal:
                 self.rt.journal.event("tool_result", agent.id, tool=name,
-                                      chars=len(content), preview=content[:400])
+                                      chars=len(content), ms=elapsed[i],
+                                      lines=content.count("\n") + 1,
+                                      preview=content[:400])
             out.append({"role": "tool", "tool_name": name, "content": content})
         return out
+
+    def _timed(self, name: str, args: dict, agent):
+        start = time.time()
+        out = self._invoke(name, args, agent)
+        return out, max(0, int((time.time() - start) * 1000))
 
     def _untrusted(self, name: str) -> bool:
         from .. import config as C

@@ -98,7 +98,8 @@ class TuiTests(unittest.TestCase):
         t, line = self._render(40, {"type": "tool_result", "agent": "a1",
                                     "tool": "bash", "preview": "y" * 300})
         self.assertTrue(t.narrow)
-        self.assertIn("ok bash", line)
+        self.assertIn("bash", line)
+        self.assertIn("✓", line)
         self.assertLessEqual(len(line), 40, line)
 
     def test_quiet_and_json_modes_silent(self):
