@@ -43,6 +43,17 @@ def _base_args(srv, *sets):
     return args
 
 
+def _logs(home):
+    """Small diagnostic dump used when a detached run never appears."""
+    base = Path(home)
+    out = []
+    for p in sorted((base / "detached").glob("*.log")):
+        out.append(f"--- {p.name} ---\n" + p.read_text(encoding="utf-8", errors="replace")[:1500])
+    for p in sorted((base / "runs").glob("*/run.json")):
+        out.append(f"--- {p.parent.name} ---\n" + p.read_text(encoding="utf-8", errors="replace")[:500])
+    return "\n".join(out) or "(no logs)"
+
+
 def _wait_run(home, timeout=45):
     """Wait for the newest run under HYDRA_HOME to reach a final status."""
     runs = Path(home) / "runs"
@@ -130,7 +141,7 @@ class DetachTests(Base):
         self.assertIn("detached", proc.stdout.lower())
         self.assertLess(elapsed, 2.5, "detach must return immediately")
         rid_dir, meta = _wait_run(self.home.name, timeout=45)
-        self.assertIsNotNone(meta, f"run never finished: {rid_dir}")
+        self.assertIsNotNone(meta, f"run never finished: {rid_dir}\n{_logs(self.home.name)}")
         self.assertEqual(meta.get("status"), "done")
         self.assertEqual(meta.get("exit_code"), 0)
 

@@ -37,6 +37,39 @@ class NotifyFlagTests(unittest.TestCase):
         self.assertIn("--notify", inner)
         self.assertIn("do work", inner)
 
+    def test_detach_tmux_forwards_caller_environment(self):
+        # A tmux server keeps the environment it was started with; a detached
+        # run must still use this caller's HYDRA_HOME / PYTHONPATH (the T23
+        # suite flake: a stale server made the run land in the wrong home).
+        o, _rest = cli._parse(["--detach", "do work"])
+        with tempfile.TemporaryDirectory() as home:
+            old_home = os.environ.get("HYDRA_HOME")
+            old_path = os.environ.get("PYTHONPATH")
+            os.environ["HYDRA_HOME"] = home
+            os.environ["PYTHONPATH"] = "/tmp/hydra-repo-test"
+            try:
+                with mock.patch.object(cli.shutil, "which",
+                                       return_value="/usr/bin/tmux"), \
+                        mock.patch.object(cli.subprocess, "run") as run:
+                    self.assertEqual(cli._spawn_detached({}, "do work", o), 0)
+            finally:
+                if old_home is None:
+                    os.environ.pop("HYDRA_HOME", None)
+                else:
+                    os.environ["HYDRA_HOME"] = old_home
+                if old_path is None:
+                    os.environ.pop("PYTHONPATH", None)
+                else:
+                    os.environ["PYTHONPATH"] = old_path
+        cmd = run.call_args.args[0]
+        self.assertIn("-e", cmd)
+        self.assertIn(f"HYDRA_HOME={home}", cmd)
+        self.assertIn("/tmp/hydra-repo-test", " ".join(cmd))
+        self.assertNotIn("OLLAMA_API_KEY", " ".join(cmd))
+        self.assertIn("-c", cmd)
+        self.assertEqual(cmd[cmd.index("-c") + 1], os.getcwd())
+        self.assertIn("cd " + os.getcwd(), cmd[-1])
+
     def test_flag_forces_notify_on_finish_for_the_run(self):
         o = cli.Opts()
         o.notify = True

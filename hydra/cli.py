@@ -584,25 +584,52 @@ def _spawn_detached(cfg, task, o) -> int:
         env["PYTHONPATH"] = os.pathsep.join([root] + have) if have else root
     if shutil.which("tmux"):
         import shlex
-        name = f"hydra_{stamp}"
-        inner = ("termux-wake-lock 2>/dev/null; "
+        name = f"hydra_{stamp}_{os.getpid()}"
+        try:
+            start_dir = os.getcwd()
+        except OSError:
+            start_dir = str(C.home())
+        # tmux may ignore -c when the server's own cwd was deleted; an explicit
+        # cd in the session shell is the reliable fix. Without it the child
+        # crashes in Path.cwd() before it can read a task.
+        inner = (f"cd {shlex.quote(start_dir)} || exit 1; "
+                 "termux-wake-lock 2>/dev/null; "
                  "HYDRA_DETACHED=1 "
                  + " ".join(shlex.quote(a) for a in cmd)
                  + f" 2>&1 | tee -a {shlex.quote(str(log))}; "
                    "termux-wake-unlock 2>/dev/null")
-        try:
-            subprocess.run(["tmux", "new-session", "-d", "-s", name, inner],
-                           check=True, timeout=30)
+        # A tmux session inherits the *server's* environment, not the caller's
+        # (the server may have been started hours ago with another HOME). Forward
+        # the variables that decide where the run lives and what it imports.
+        # Never forward the API key: the child reads it from ~/.hydra/key.
+        tmux_cmd = ["tmux", "new-session", "-d", "-s", name]
+        tmux_cmd += ["-c", start_dir]
+        for key in ("HOME", "PATH", "PYTHONPATH", "TMPDIR", "PREFIX",
+                    "LANG", "LC_ALL", "TERM", "HYDRA_HOME",
+                    "HYDRA_DEBUG_HTTP"):
+            val = env.get(key)
+            if val:
+                tmux_cmd += ["-e", f"{key}={val}"]
+        tmux_cmd.append(inner)
+        plain_cmd = ["tmux", "new-session", "-d", "-s", name, "-c", start_dir, inner]
+        started, last = False, None
+        for attempt in (tmux_cmd, plain_cmd):
+            try:
+                subprocess.run(attempt, check=True, timeout=30)
+                started = True
+                break
+            except Exception as exc:
+                last = exc
+        if started:
             print(f"detached in tmux session {name}")
             print(f"  attach:  tmux attach -t {name}")
             print(f"  log:     {log}")
             print("  progress: hydra ls · hydra tail")
             return 0
-        except Exception as exc:
-            print(f"tmux failed ({exc}); using a plain detached process")
+        print(f"tmux failed ({last}); using a plain detached process")
     with open(log, "ab") as fh:
         subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, cwd=os.getcwd(),
+                         stdin=subprocess.DEVNULL, cwd=start_dir,
                          env=env, start_new_session=True)
     print("detached (new session — survives closing Termux; tmux not installed)")
     print(f"  log:      {log}")
