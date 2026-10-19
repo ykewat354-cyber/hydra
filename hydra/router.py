@@ -226,27 +226,36 @@ class Router:
             think_repaired = False
             while True:
                 attempt += 1
-                self._event("model_request", agent, role=role, model=model,
-                            tools=[t.get("function", {}).get("name") for t in (tools or [])],
-                            n_messages=len(messages), attempt=attempt)
                 try:
                     with self._slot(priority):
+                        # Journal the request once the gate admits it: an event
+                        # emitted while queueing would make serialized calls look
+                        # concurrent to the timeline analysis.
+                        self._event("model_request", agent, role=role, model=model,
+                                    tools=[t.get("function", {}).get("name")
+                                           for t in (tools or [])],
+                                    n_messages=len(messages), attempt=attempt)
                         reply = self.client.chat(
                             model, messages,
                             tools=tools or None,
                             think=self.think_setting(role, model, think),
                             options=self.options_for(role) or None,
                             stream=True, on_delta=on_delta, format=format)
-                    if self._is_empty(reply):
+                        # Ledger (model_response) while still holding the slot so
+                        # the response event can never be ordered after the next
+                        # agent's request event.
+                        empty = self._is_empty(reply)
+                        if not empty:
+                            self._breaker_ok(model)
+                            self._mark(model, "ok")
+                            self._ledger(agent, role, model, reply)
+                    if empty:
                         if attempt == 1:
                             messages = list(messages) + [{
                                 "role": "user",
                                 "content": "Your previous reply was empty. Reply with tool calls or a complete final answer."}]
                             continue
                         raise EmptyReply("empty reply twice")
-                    self._breaker_ok(model)
-                    self._mark(model, "ok")
-                    self._ledger(agent, role, model, reply)
                     return reply
                 except AuthError:
                     raise

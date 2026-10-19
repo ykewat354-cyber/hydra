@@ -37,7 +37,9 @@ def _overlap_peak(intervals: list[tuple[float, float]]) -> int:
     for start, end in intervals:
         edges.append((start, 1))
         edges.append((end, -1))
-    edges.sort(key=lambda x: (x[0], -x[1]))
+    # Ends sort before starts at the same timestamp: journals round to the
+    # millisecond, so a call that hands over to the next one can share a ts.
+    edges.sort(key=lambda x: (x[0], x[1]))
     cur = peak = 0
     for _, delta in edges:
         cur += delta
@@ -51,7 +53,7 @@ def _overlap_seconds(intervals: list[tuple[float, float]]) -> float:
     for start, end in intervals:
         edges.append((start, 1))
         edges.append((end, -1))
-    edges.sort(key=lambda x: (x[0], -x[1]))
+    edges.sort(key=lambda x: (x[0], x[1]))
     cur = 0
     total = 0.0
     prev = None
