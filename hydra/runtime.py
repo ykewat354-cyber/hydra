@@ -9,9 +9,11 @@ import time
 from pathlib import Path
 
 from . import config as C
+from . import caps as Caps
 from . import httpdebug
 from . import hygiene
 from . import journal as J
+from . import limits as Limits
 from .agent import Agent, build_env_block, load_system_prompt
 from .client import AuthError, OllamaCloud
 from .gate import LLMGate
@@ -40,8 +42,11 @@ class Runtime:
         self.sigint = threading.Event()   # first Ctrl-C: cancel, keep the run alive
         self.client.cancel_event = self.sigint
         self.client.redact = self.redact
+        self.client.reject_status = Limits.rejection_status()  # F5
         self._child_env: dict = {}
-        self.gate = LLMGate(C.max_inflight(cfg))
+        self.gate = LLMGate(Limits.gate_capacity(cfg),
+                            semantics=Limits.semantics())      # F5
+        self.caps = Caps.get_caps(cfg, client=self.client)     # F6 (24 h cache)
         self.registry = ModelRegistry(cfg)
         self.router = Router(cfg, self.client, self.prices, gate=self.gate,
                              registry=self.registry)
@@ -134,7 +139,8 @@ class Runtime:
                                  redact=self.redact)
         self._attach_http_log()
         self.router.journal = self.journal
-        self.env_block = build_env_block(self.cwd, self.cfg, role="lead")
+        self.env_block = build_env_block(self.cwd, self.cfg, role="lead",
+                                         caps=self.caps)
         if lead_model:
             chain = list(C.get(self.cfg, "roles.lead.chain") or [])
             self.cfg.setdefault("roles", {}).setdefault("lead", {})["chain"] = \
@@ -169,7 +175,8 @@ class Runtime:
         self._attach_http_log()
         self.router.journal = self.journal
         self.cwd = Path(data.get("cwd") or self.cwd)
-        self.env_block = build_env_block(self.cwd, self.cfg, role="lead")
+        self.env_block = build_env_block(self.cwd, self.cfg, role="lead",
+                                         caps=self.caps)
         lead = Agent("a0", "lead", data.get("task", ""), self.cfg, workdir=self.cwd,
                      system_prompt=load_system_prompt("lead"),
                      env_block=self.env_block)
@@ -260,7 +267,8 @@ class Runtime:
             cap = None if full else int(
                 C.get(self.cfg, "project.subagent_chars", 2000) or 2000)
             self._child_env[role] = build_env_block(self.cwd, self.cfg, role=role,
-                                                    project_cap=cap)
+                                                    project_cap=cap,
+                                                    caps=self.caps)
         return self._child_env[role]
 
     def run(self, task: str, name: str = None, lead_model: str = None):
@@ -301,3 +309,7 @@ class Runtime:
                 pool.shutdown(wait=False)
             except Exception:
                 pass
+        try:
+            self.client.close()          # F7: close pooled keep-alive sockets
+        except Exception:
+            pass

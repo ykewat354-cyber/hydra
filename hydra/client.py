@@ -6,6 +6,8 @@ Transport rules (§5.2 of the spec):
   * Final chunk (done=true) carries prompt_eval_count / eval_count.
   * Tool calls arrive whole; detect them by presence, never by done_reason.
   * connect timeout 15 s, idle timeout 90 s (phone networks stall mid-stream).
+  * F7 keep-alive: one persistent connection per thread, reconnected on
+    stale/error; T10 measured median 1204 ms fresh vs 799 ms reused.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import http.client
 import json
 import socket
 import ssl
+import threading
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -132,33 +135,119 @@ class OllamaCloud:
         self.cancel_event = None  # set by Runtime: a threading.Event (SIGINT)
         self.redact = None        # set by Runtime: fn(str)->str (secret hygiene)
         self.http_log = None      # set by Runtime (F4 --debug-http): HttpLogger
+        self.reject_status = None  # F5: calibrated reject:<status>, if any
+        # F7 keep-alive: one persistent connection per thread.  T10 measured
+        # median latency 1204 ms fresh vs 799 ms reused on this phone.
+        self.reuse_idle_secs = 120.0
+        self._pool = threading.local()
+        self._live: set = set()
+        self._live_lock = threading.Lock()
 
-    # -------------------------------------------------- plumbing
-    def _connect(self):
+    # -------------------------------------------------- connection pool
+    def _new_connection(self):
         if self._scheme == "https":
             ctx = ssl.create_default_context()
             conn = http.client.HTTPSConnection(self._netloc, timeout=self.connect_timeout, context=ctx)
         else:
             conn = http.client.HTTPConnection(self._netloc, timeout=self.connect_timeout)
+        with self._live_lock:
+            self._live.add(conn)
         return conn
+
+    def _get_connection(self):
+        """The calling thread's connection, replacing stale/idle/closed ones."""
+        conn = getattr(self._pool, "conn", None)
+        if conn is not None:
+            idle = time.monotonic() - float(getattr(self._pool, "last_used", 0.0) or 0.0)
+            if getattr(conn, "sock", None) is None or idle > self.reuse_idle_secs:
+                self._discard(conn)
+                conn = None
+        if conn is None:
+            conn = self._new_connection()
+            self._pool.conn = conn
+        return conn
+
+    def _discard(self, conn) -> None:
+        if conn is None:
+            return
+        if getattr(self._pool, "conn", None) is conn:
+            self._pool.conn = None
+        with self._live_lock:
+            self._live.discard(conn)
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    def _release(self, conn) -> None:
+        self._pool.conn = conn
+        self._pool.last_used = time.monotonic()
+
+    def _request(self, conn, method: str, path: str, body):
+        """Send on *conn*; if the pooled socket is stale, reconnect and retry.
+
+        A dead keep-alive socket can only be detected by using it.  The retry
+        happens before any response byte exists, so a chat call is not billed
+        twice by a half-open socket (the server closes those without work).
+        """
+        try:
+            conn.request(method, path, body, self._headers())
+            return conn
+        except (ConnectionError, socket.timeout, TimeoutError, OSError,
+                http.client.HTTPException):
+            self._discard(conn)
+            fresh = self._new_connection()
+            self._pool.conn = fresh
+            try:
+                fresh.request(method, path, body, self._headers())
+            except Exception:
+                self._discard(fresh)
+                raise
+            return fresh
+
+    def close(self) -> None:
+        """Close every pooled connection (all threads) — never raises."""
+        with self._live_lock:
+            conns = list(self._live)
+            self._live.clear()
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._pool.conn = None
 
     def _headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Connection": "keep-alive",   # F7: reuse the pooled socket
             "User-Agent": "hydra/1.0 (termux)",
         }
 
+    def _classify(self, status: int, raw: str, model: str, retry_after=None):
+        """classify, plus F5: a calibrated reject:<status> is retryable even
+        when the status alone would not say so (e.g. a 400 concurrency gate)."""
+        err = classify(status, raw, model, retry_after)
+        rs = self.reject_status
+        try:
+            calibrated = rs is not None and int(status) == int(rs)
+        except (TypeError, ValueError):
+            calibrated = False
+        if calibrated and not err.retryable and int(status) not in (401, 402, 403, 404):
+            return RateLimited(status, raw, model, retry_after)
+        return err
+
     def _json_request(self, method: str, path: str, payload=None) -> dict:
-        conn = self._connect()
+        conn = self._get_connection()
         started = time.time()
         status, ttfb, req_bytes, resp_bytes = 0, None, 0, 0
-        headers, error_body, got_resp = None, None, False
+        headers, error_body, got_resp, reusable = None, None, False, False
         try:
             body = json.dumps(payload).encode() if payload is not None else None
             req_bytes = len(body or b"")
-            conn.request(method, path, body, self._headers())
+            conn = self._request(conn, method, path, body)
             resp = conn.getresponse()
             got_resp = True
             status = resp.status
@@ -166,11 +255,12 @@ class OllamaCloud:
             headers = httpdebug.pick_headers(resp)
             raw = resp.read().decode("utf-8", "replace")
             resp_bytes = len(raw.encode("utf-8", "replace"))
+            reusable = not getattr(resp, "will_close", False)
             if self.redact is not None:
                 raw = self.redact(raw)  # a server echo must not reach tracebacks
             if resp.status >= 400:
                 error_body = raw
-                raise classify(resp.status, raw, "api")
+                raise self._classify(resp.status, raw, "api")
             try:
                 return json.loads(raw or "{}")
             except json.JSONDecodeError:
@@ -179,10 +269,10 @@ class OllamaCloud:
             if got_resp:
                 self._log_http(method, path, "", status, started, ttfb, req_bytes,
                                resp_bytes, headers, error_body=error_body)
-            try:
-                conn.close()
-            except Exception:
-                pass
+            if reusable:
+                self._release(conn)
+            else:
+                self._discard(conn)
 
     def _log_http(self, method, path, model, status, started, ttfb, req_bytes,
                   resp_bytes, headers, think=None, format=None, prefix=None,
@@ -215,18 +305,18 @@ class OllamaCloud:
             # structured outputs (§19.10): tool-less calls only — callers enforce
             payload["format"] = format
 
-        conn = self._connect()
+        conn = self._get_connection()
         started = time.time()
         prefix = httpdebug.prefix_hash(messages, tools) if self.http_log is not None else None
         status, ttfb, req_bytes, resp_bytes = 0, None, 0, 0
-        headers, error_body, got_resp = None, None, False
+        headers, error_body, got_resp, reusable = None, None, False, False
         try:
             body = json.dumps(payload)
             if self.redact is not None:
                 body = self.redact(body)  # nothing leaves for a model un-redacted
             body = body.encode()
             req_bytes = len(body)
-            conn.request("POST", "/api/chat", body, self._headers())
+            conn = self._request(conn, "POST", "/api/chat", body)
             resp = conn.getresponse()
             got_resp = True
             status = resp.status
@@ -235,6 +325,7 @@ class OllamaCloud:
             if resp.status >= 400:
                 raw = resp.read().decode("utf-8", "replace")
                 resp_bytes = len(raw.encode("utf-8", "replace"))
+                reusable = not getattr(resp, "will_close", False)
                 if self.redact is not None:
                     raw = self.redact(raw)  # a server echo must not reach tracebacks
                 error_body = raw
@@ -245,11 +336,12 @@ class OllamaCloud:
                         retry_after = float(ra)
                     except (TypeError, ValueError):
                         pass
-                raise classify(resp.status, raw, model, retry_after)
+                raise self._classify(resp.status, raw, model, retry_after)
 
             if not stream:
                 raw_bytes = resp.read()
                 resp_bytes = len(raw_bytes)
+                reusable = not getattr(resp, "will_close", False)
                 raw = raw_bytes.decode("utf-8", "replace")
                 data = json.loads(raw or "{}")
                 msg = data.get("message") or {}
@@ -319,6 +411,13 @@ class OllamaCloud:
             reply.ms = int((time.time() - started) * 1000)
             if not done:
                 raise StreamStalled("stream ended before the done chunk")
+            # drain the chunked terminator/trailers (or EOF) so the keep-alive
+            # socket returns to a clean state for the next request (F7).
+            try:
+                resp.read()
+                reusable = not getattr(resp, "will_close", False)
+            except Exception:
+                reusable = False
             return reply
         finally:
             if got_resp:
@@ -326,10 +425,10 @@ class OllamaCloud:
                                req_bytes, resp_bytes, headers, think=think,
                                format=format, prefix=prefix,
                                error_body=error_body)
-            try:
-                conn.close()
-            except Exception:
-                pass
+            if reusable:
+                self._release(conn)
+            else:
+                self._discard(conn)
 
     def _check_cancel(self) -> None:
         ev = self.cancel_event

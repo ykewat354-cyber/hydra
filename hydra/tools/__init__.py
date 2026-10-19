@@ -75,6 +75,24 @@ def tools_for(spec, role: str):
     return {s.strip() for s in str(spec).split(",") if s.strip()}
 
 
+def caps_allowed(name: str, caps: dict) -> bool:
+    """F6: drop tools whose backing capability auto-detect found dead.
+
+    Missing/unknown caps (None/{}) fail open — the tool stays available.
+    """
+    if not caps:
+        return True
+    if name == "web_search":
+        return bool(caps.get("web_search", True))
+    if name == "web_fetch":
+        return bool(caps.get("web_fetch", True))
+    if name == "view_image":
+        return bool(caps.get("vision", True))
+    if name.startswith("termux_"):
+        return bool(caps.get("termux_api", True))
+    return True
+
+
 class Registry:
     def __init__(self, rt):
         self.rt = rt
@@ -116,12 +134,15 @@ class Registry:
             mcp_ok = True
         with self.lock:
             items = sorted(self.tools.items())
+        caps = getattr(self.rt, "caps", None) or {}
         out = []
         for n, t in items:
             is_mcp = n.startswith("mcp__")
             if is_mcp and not mcp_ok:
                 continue
             if names is not None and n not in names and not is_mcp:
+                continue
+            if not caps_allowed(n, caps):
                 continue
             out.append(t.schema())
         return out

@@ -203,6 +203,7 @@ def run_agent(agent):
 - `think` is a bool for some models and a level string (`"low"|"medium"|"high"`) for others (e.g. gpt-oss). The router translates the role's `think` setting per model (§7.4).
 - Don't use the OpenAI-compatible `/v1` endpoint; the native one exposes `thinking` properly.
 - Sockets: connect timeout 15 s, **idle timeout 90 s** (`sock.settimeout`). Phones switch Wi-Fi ↔ LTE mid-stream; a stalled stream is a failed call, so retry it whole.
+- **Keep-alive** (F7): one persistent connection per thread, reused across calls and reconnected only when stale/errored. T10 measured on this phone: median **1204 ms** fresh vs **799 ms** reused (≈405 ms saved per call). A stream is drained to its terminator before the socket goes back to the pool, and `--debug-http` still logs one record per call.
 
 ### 5.3 Loop behaviours (all required)
 

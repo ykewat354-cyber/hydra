@@ -57,7 +57,8 @@ commands:
   undo [RUN] [--to N]   restore the workdir from a shadow snapshot
   eval [SUITE]          run scripted eval suites on the fake server
   init                  the lead explores the repo and writes HYDRA.md
-  doctor                environment checks
+  doctor                environment checks (--limits: calibrate concurrency,
+                        --caps: force a capability re-check)
   kill RUN              stop a run
 
 flags:
@@ -192,7 +193,7 @@ def main(argv=None) -> int:
     cmd = rest[0] if rest[0] in COMMANDS else None
 
     if cmd == "doctor":
-        return cmd_doctor(cfg)
+        return cmd_doctor(cfg, rest[1:])
     if cmd == "ls":
         return cmd_ls()
     if cmd == "usage":
@@ -655,8 +656,27 @@ def cmd_repl(cfg, o) -> int:
 
         th = threading.Thread(target=work, daemon=True)
         th.start()
-        import select
+        # A blocking reader thread, not select() on sys.stdin: the first-line
+        # read may have buffered lines ahead that select() would never see.
+        import queue as _queue
+        inbox: "_queue.Queue" = _queue.Queue()
+        stop_reader = threading.Event()
+
+        def _read_stdin():
+            while not stop_reader.is_set():
+                try:
+                    line = sys.stdin.readline()
+                except Exception:
+                    line = ""
+                if line == "":
+                    inbox.put(None)
+                    return
+                inbox.put(line)
+
+        threading.Thread(target=_read_stdin, daemon=True,
+                         name="repl-stdin").start()
         pending = []  # steers typed before the lead agent exists
+        notes_pending = []  # /note text typed before the journal exists
         try:
             while th.is_alive():
                 lead = rt.agents.get("a0")
@@ -665,23 +685,27 @@ def cmd_repl(cfg, o) -> int:
                         lead.send(m)
                     pending.clear()
                     print("→ steered")
+                if notes_pending and rt.journal is not None:
+                    try:
+                        for text in notes_pending:
+                            rt.journal.blackboard_append("repl", text, persist=False)
+                        notes_pending.clear()
+                        print("noted")
+                    except Exception:
+                        pass   # the run just ended and closed the journal
                 try:
-                    ready, _, _ = select.select([sys.stdin], [], [], 0.25)
-                except CallCancelled:
-                    print("(cancelling the in-flight work…)")
+                    line = inbox.get(timeout=0.25)
+                except _queue.Empty:
                     continue
-                except Exception:
-                    ready = []
-                if not ready:
-                    continue
-                line = sys.stdin.readline()
-                if line == "":  # stdin closed — the run continues to the end
+                except KeyboardInterrupt:
+                    raise
+                if line is None:  # stdin closed — the run continues to the end
                     break
                 line = line.strip()
                 if not line:
                     continue
                 if line.startswith("/"):
-                    if not _repl_cmd(rt, line, pending):
+                    if not _repl_cmd(rt, line, pending, notes_pending):
                         break
                 else:
                     from . import mentions
@@ -694,6 +718,8 @@ def cmd_repl(cfg, o) -> int:
             print("\ninterrupted — checkpoint saved; `hydra resume` continues")
             code = 130
             report = {"status": "interrupted", "summary": "cancelled by user (Ctrl-C)"}
+        finally:
+            stop_reader.set()
         th.join(timeout=15)
         if code != 130:
             code = box.get("code", 1)
@@ -706,7 +732,7 @@ def cmd_repl(cfg, o) -> int:
     return code
 
 
-def _repl_cmd(rt, line, pending=None) -> bool:
+def _repl_cmd(rt, line, pending=None, notes=None) -> bool:
     """Handle one /command. Returns False to leave the REPL loop."""
     parts = line.split(None, 1)
     cmd = parts[0]
@@ -799,9 +825,13 @@ def _repl_cmd(rt, line, pending=None) -> bool:
         rt.paused.clear()
         print("resumed")
     elif cmd == "/note":
-        if arg and rt.journal:
+        if not arg:
+            print("usage: /note text")
+        elif rt.journal:
             rt.journal.blackboard_append("repl", arg, persist=False)
             print("noted")
+        elif notes is not None:
+            notes.append(arg)   # run still starting: write once the journal exists
         else:
             print("usage: /note text")
     elif cmd in ("/help", "/?"):
@@ -1139,19 +1169,77 @@ def cmd_kill(args) -> int:
 # ------------------------------------------------------------------ doctor
 
 def _termux_ok() -> bool:
-    import subprocess
-    if not shutil.which("termux-battery-status"):
-        return False
-    try:
-        p = subprocess.run(["termux-battery-status"], capture_output=True,
-                           text=True, timeout=3)
-        return p.returncode == 0
-    except Exception:
-        return False
+    from . import caps
+    return caps.termux_ok()
 
 
-def cmd_doctor(cfg) -> int:
+def _doctor_limits(cfg) -> int:
+    """`hydra doctor --limits`: T08 probe, <=6 tiny calls, write limits.json."""
+    from . import hygiene
+    from . import limits as Limits
     from .client import OllamaCloud
+
+    key = C.load_key(cfg) or ""
+    host = C.get(cfg, "api.host", "https://ollama.com")
+    cli = OllamaCloud(host, key, C.get(cfg, "api.connect_timeout", 15) or 15,
+                      C.get(cfg, "api.idle_timeout", 90) or 90)
+    cli.redact = hygiene.make_redactor(cfg)
+    try:
+        data = Limits.probe(cli, cfg)
+    except Limits.ProbeError as exc:
+        print(f"[FAIL] limits probe: {exc}")
+        return 1
+    except Exception as exc:
+        print(f"[FAIL] limits probe: {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        cli.close()
+    Limits.save_limits(data)
+    print(f"limits: behaviour={data['behaviour']} "
+          f"max_parallel_ok={data['max_parallel_ok']} "
+          f"model={data.get('model')} calls={data.get('calls')} "
+          f"checked_at={data.get('checked_at')}")
+    print(f"wrote {Limits.limits_path()}")
+    return 0
+
+
+def _doctor_caps(cfg) -> int:
+    """`hydra doctor --caps`: boolean probe of the local + hosted tools."""
+    from . import caps as Caps
+    from . import hygiene
+    from .client import OllamaCloud
+
+    key = C.load_key(cfg) or ""
+    host = C.get(cfg, "api.host", "https://ollama.com")
+    cli = OllamaCloud(host, key, C.get(cfg, "api.connect_timeout", 15) or 15)
+    cli.redact = hygiene.make_redactor(cfg)
+    try:
+        data = Caps.get_caps(cfg, client=cli, force=True)
+    except Exception as exc:
+        print(f"[FAIL] caps detect: {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        cli.close()
+    for name in Caps.CAP_KEYS:
+        mark = "ok  " if data.get(name) else "no  "
+        extra = ""
+        if name == "vision" and data.get("vision_model"):
+            extra = f" ({data['vision_model']})"
+        print(f"[{mark}] {name}{extra}")
+    print(f"wrote {Caps.caps_path()}  ({Caps.env_line(data)})")
+    return 0
+
+
+def cmd_doctor(cfg, args=None) -> int:
+    from .client import OllamaCloud
+    args = list(args or [])
+    if "--caps" in args or "--limits" in args:
+        code = 0
+        if "--caps" in args:
+            code = _doctor_caps(cfg) or code
+        if "--limits" in args:
+            code = _doctor_limits(cfg) or code
+        return code
     ok = True
 
     def chk(label, cond, hint="", soft=False):
