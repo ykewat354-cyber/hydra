@@ -118,10 +118,43 @@ def strip_inline(text: str) -> str:
     return s
 
 
+def _is_join_mark(ch: str) -> bool:
+    """Zero-width joiners and combining marks (Mn/Mc/Me) must never start a row."""
+    if not ch:
+        return False
+    return bool(unicodedata.combining(ch)) or unicodedata.category(ch) in (
+        "Mn", "Mc", "Me", "Cf")
+
+
+def _cluster_start(text: str) -> int:
+    """Index where the trailing grapheme-ish cluster begins.
+
+    A row must never break before a combining/spacing mark. A virama (or ZWJ)
+    before the base also binds it to the cluster before it, so ``स्त`` still
+    stays together while ``दु|नि|या`` can break between syllables.
+    """
+    s = max(0, len(text) - 1)
+    while s > 0:
+        ch, prev = text[s], text[s - 1]
+        if _is_join_mark(ch) or unicodedata.combining(prev) or prev in _ZERO_WIDTH:
+            s -= 1
+        else:
+            break
+    return s
+
+
 def _split_word(word: str, width: int) -> list:
     parts, cur = [], ""
     for ch in word:
-        if display_width(cur) + char_width(ch) > width and cur:
+        if cur and display_width(cur) + char_width(ch) > width:
+            if _is_join_mark(ch):
+                s = _cluster_start(cur)
+                if s > 0:
+                    parts.append(cur[:s])
+                    cur = cur[s:] + ch
+                    continue
+                cur += ch  # one unsplittable cluster: keep the mark attached
+                continue
             parts.append(cur)
             cur = ch
         else:

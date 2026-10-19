@@ -618,6 +618,13 @@ transcript uses the full width. The minimum usable width is 30 columns. Pipes,
 `--quiet`, `--json`, `--plain` and non-TTY contexts automatically keep the
 compact line stream, so scripts and `hydra daemon` never hang on a terminal.
 
+**Terminal recovery after `kill -9`.** Normal quit, `Ctrl-C`, SIGTERM and SIGHUP
+all restore the cursor, leave mouse tracking and the alternate screen. A hard
+`kill -9` cannot run that cleanup, so a terminal may be left in mouse-tracking
+mode (stray `\x1b[<…` text on tap/scroll) or with the cursor hidden. Run the
+shell `reset` command (or `stty sane`) to recover; nothing in the run is lost —
+`hydra resume` continues where it stopped.
+
 **Research deliverables.** For a research/list/comparison/report task, the lead is
 required to write the complete result to a file (default `RESEARCH.md`), list it
 in `files_changed`/`artifacts`, and check the requested count and uniqueness. The
