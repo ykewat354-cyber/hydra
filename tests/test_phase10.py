@@ -351,6 +351,36 @@ class PlainCliTests(Base):
         self.assertNotIn('"cmd"', out)
         self.assertNotIn("Traceback", out)
 
+    def test_run_reads_a_task_file_and_rejects_a_missing_one(self):
+        task_file = Path(self.cwd.name) / "task.md"
+        task_file.write_text("run-file smoke task\n", encoding="utf-8")
+        self.srv.add("gpt-oss:120b",
+                     {"content": "Read the task file.",
+                      "tool_calls": [{"function": {"name": "finish",
+                                                   "arguments": {
+                                                       "status": "done",
+                                                       "summary": "Run-file task done."}}}]})
+        env = dict(os.environ)
+        env.update(HYDRA_HOME=self.home.name, PYTHONPATH=str(REPO), TERM="dumb")
+        base = [sys.executable, "-m", "hydra", "--plain",
+                "--set", f"api.host={self.srv.url}",
+                "--set", "loop.verify=never",
+                "--set", "termux.wake_lock=false",
+                "--set", "termux.notify_on_finish=false",
+                "--set", "termux.notify_on_park=false"]
+        proc = subprocess.run(base + ["run", str(task_file)],
+                              cwd=self.cwd.name, env=env,
+                              capture_output=True, text=True, timeout=40)
+        out = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, out)
+        self.assertIn("Run-file task done.", out)
+        self.assertIn("run-file smoke task", out)
+        missing = subprocess.run(base + ["run", str(Path(self.cwd.name) / "nope.md")],
+                                 cwd=self.cwd.name, env=env,
+                                 capture_output=True, text=True, timeout=40)
+        self.assertEqual(missing.returncode, 2, missing.stdout + missing.stderr)
+        self.assertIn("file not found", missing.stdout + missing.stderr)
+
 
 class RuntimeTuiTests(Base):
     def test_runtime_streams_assistant_text_and_compact_tools(self):

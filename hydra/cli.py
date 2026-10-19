@@ -216,7 +216,28 @@ def main(argv=None) -> int:
     if cmd == "eval":
         return cmd_eval(cfg, rest[1:], o)
 
-    task = " ".join(rest)
+    if cmd == "run":
+        args = rest[1:]
+        if not args:
+            print("hydra: 'run' needs a task or a readable .md/.txt file")
+            return 2
+        candidate = Path(args[0]).expanduser()
+        if len(args) == 1 and candidate.is_file():
+            try:
+                task = candidate.read_text(encoding="utf-8", errors="replace")
+            except Exception as exc:
+                print(f"hydra: cannot read {args[0]}: {exc}")
+                return 2
+        elif len(args) == 1 and candidate.suffix.lower() in (".md", ".txt"):
+            print(f"hydra: file not found: {args[0]}")
+            return 2
+        else:
+            task = " ".join(args)
+        if not task.strip():
+            print(f"hydra: {args[0]} is empty")
+            return 2
+    else:
+        task = " ".join(rest)
     if not task.strip():
         return cmd_tui(cfg, o)
     if task.startswith("/"):

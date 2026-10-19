@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.1.0).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 122 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.1 adds the full-screen TUI, research deliverable enforcement, and a raw web-fetch fallback.
+> **Status: implemented (v1.1.0).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 123 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.1 adds the full-screen TUI, research deliverable enforcement, and a raw web-fetch fallback.
 
 ### Install (one line)
 
