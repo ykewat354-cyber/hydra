@@ -13,6 +13,7 @@ import time
 
 from . import config as C
 from . import hooks
+from . import limits as Limits
 from . import verifier
 from .agent import normalize_call, parse_text_calls
 from .client import CallCancelled, ContextOverflow
@@ -33,6 +34,10 @@ def run_agent(agent, rt) -> dict:
                     agent.status = "killed"
                     agent.set_report("killed", "Cancelled.")
                     break
+                if rt.budget_exceeded():
+                    rt.budget_hit = True
+                    raise Limits.BudgetExceeded(
+                        f"spend cap ${rt.budget_usd:.4f} reached")
                 paused = getattr(rt, "paused", None)
                 if paused is not None and paused.is_set():
                     while paused.is_set() and not agent.cancelled.is_set():
@@ -58,6 +63,11 @@ def run_agent(agent, rt) -> dict:
                         raise
                     agent.turns -= 1  # a forced compaction retry is not a new turn
                     continue
+
+                if rt.budget_exceeded():
+                    rt.budget_hit = True
+                    raise Limits.BudgetExceeded(
+                        f"spend cap ${rt.budget_usd:.4f} reached")
 
                 calls = [c for c in (normalize_call(tc) for tc in (reply.tool_calls or [])) if c]
                 from_text = False

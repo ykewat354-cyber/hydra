@@ -25,29 +25,54 @@ UA = ("Mozilla/5.0 (Android 16; Termux aarch64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36 HYDRA/1.0")
 
 
+def _cached(ctx, key: str, fn):
+    """F14: identical web calls within one run reuse the first result."""
+    rt = getattr(ctx, "rt", None)
+    cache = getattr(rt, "web_cache", None)
+    lock = getattr(rt, "web_cache_lock", None)
+    if cache is None or lock is None:
+        return fn()
+    with lock:  # also serialises duplicate parallel calls
+        if key in cache:
+            return cache[key]
+        out = fn()
+        if not str(out).startswith("ERROR:"):
+            cache[key] = out
+        return out
+
+
+def _cache_key(tool: str, **parts) -> str:
+    return tool + ":" + json.dumps(parts, sort_keys=True, ensure_ascii=False,
+                                   default=str)
+
+
 def _tool_web_search(args, ctx) -> str:
     query = str(args.get("query") or "").strip()
     if not query:
         return "ERROR: query is required"
     n = int(args.get("max_results") or 5)
-    try:
-        data = ctx.client.web_search(query, n)
-    except Exception as exc:
-        return f"ERROR: web_search failed: {type(exc).__name__}: {exc}"
-    results = data.get("results") or data.get("items") or []
-    if not results:
-        return "(no results)"
-    lines = []
-    for r in results[:n]:
-        if not isinstance(r, dict):
-            lines.append(str(r))
-            continue
-        title = r.get("title") or ""
-        url = r.get("url") or r.get("link") or ""
-        content = str(r.get("content") or r.get("snippet") or r.get("text") or "")
-        lines.append(f"### {title}\n{url}\n{content[:600]}")
-    text = "\n\n".join(lines)
-    return hygiene.wrap_untrusted(ctx.cfg, text, "web_search")
+
+    def run():
+        try:
+            data = ctx.client.web_search(query, n)
+        except Exception as exc:
+            return f"ERROR: web_search failed: {type(exc).__name__}: {exc}"
+        results = data.get("results") or data.get("items") or []
+        if not results:
+            return "(no results)"
+        lines = []
+        for r in results[:n]:
+            if not isinstance(r, dict):
+                lines.append(str(r))
+                continue
+            title = r.get("title") or ""
+            url = r.get("url") or r.get("link") or ""
+            content = str(r.get("content") or r.get("snippet") or r.get("text") or "")
+            lines.append(f"### {title}\n{url}\n{content[:600]}")
+        text = "\n\n".join(lines)
+        return hygiene.wrap_untrusted(ctx.cfg, text, "web_search")
+
+    return _cached(ctx, _cache_key("web_search", query=query, n=n), run)
 
 
 def _html_to_text(raw: str) -> str:
@@ -125,34 +150,38 @@ def _tool_web_fetch(args, ctx) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return (f"ERROR: invalid URL (need http:// or https://): {url[:120]}")
-    hosted = ""
-    try:
-        data = ctx.client.web_fetch(url)
-        title = data.get("title") or ""
-        content = str(data.get("content") or data.get("text") or "")
-    except Exception as exc:
-        hosted = f"{type(exc).__name__}: {exc}"
-        if _http_404(exc):
-            # The hosted endpoint also wraps 404s in ModelMissing; a missing
-            # page is not a model problem. Try raw once, then report clearly.
-            try:
-                title, content = _fetch_raw(url)
-                content = f"(hosted endpoint said 404; raw fetch succeeded)\n{content}"
-            except Exception as raw_exc:
-                return (f"ERROR: page not found (HTTP 404): {url} "
-                        f"[raw: {type(raw_exc).__name__}: {raw_exc}]")
-        else:
-            try:
-                title, content = _fetch_raw(url)
-                content = f"(hosted endpoint failed: {hosted[:200]}; raw fetch succeeded)\n{content}"
-            except Exception as raw_exc:
-                return (f"ERROR: web_fetch failed: {hosted} "
-                        f"[raw fallback: {type(raw_exc).__name__}: {raw_exc}]")
-    trimmed = content[:8000]
-    if len(content) > 8000:
-        trimmed += f"\n[... {len(content) - 8000} chars trimmed]"
-    text = (f"# {title}\n{url}\n\n{trimmed}").strip()
-    return hygiene.wrap_untrusted(ctx.cfg, text, url)
+
+    def run():
+        hosted = ""
+        try:
+            data = ctx.client.web_fetch(url)
+            title = data.get("title") or ""
+            content = str(data.get("content") or data.get("text") or "")
+        except Exception as exc:
+            hosted = f"{type(exc).__name__}: {exc}"
+            if _http_404(exc):
+                # The hosted endpoint also wraps 404s in ModelMissing; a missing
+                # page is not a model problem. Try raw once, then report clearly.
+                try:
+                    title, content = _fetch_raw(url)
+                    content = f"(hosted endpoint said 404; raw fetch succeeded)\n{content}"
+                except Exception as raw_exc:
+                    return (f"ERROR: page not found (HTTP 404): {url} "
+                            f"[raw: {type(raw_exc).__name__}: {raw_exc}]")
+            else:
+                try:
+                    title, content = _fetch_raw(url)
+                    content = f"(hosted endpoint failed: {hosted[:200]}; raw fetch succeeded)\n{content}"
+                except Exception as raw_exc:
+                    return (f"ERROR: web_fetch failed: {hosted} "
+                            f"[raw fallback: {type(raw_exc).__name__}: {raw_exc}]")
+        trimmed = content[:8000]
+        if len(content) > 8000:
+            trimmed += f"\n[... {len(content) - 8000} chars trimmed]"
+        text = (f"# {title}\n{url}\n\n{trimmed}").strip()
+        return hygiene.wrap_untrusted(ctx.cfg, text, url)
+
+    return _cached(ctx, _cache_key("web_fetch", url=url), run)
 
 
 def _tool_http(args, ctx) -> str:

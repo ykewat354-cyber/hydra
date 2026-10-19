@@ -30,7 +30,8 @@ class WebToolTests(unittest.TestCase):
                               cwd=Path("."))
         out = webtool._tool_web_search({"query": "x", "max_results": 3}, ctx)
         self.assertTrue(out.startswith('<untrusted source="web_search">'), out)
-        self.assertTrue(out.rstrip().endswith("</untrusted>"))
+        self.assertIn("</untrusted>", out)
+        self.assertIn("Reminder:", out)  # F9: one-line reminder after the wrapper
 
     def test_large_tool_output_spills_to_readable_file(self):
         with tempfile.TemporaryDirectory() as tmp:

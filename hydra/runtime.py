@@ -77,6 +77,11 @@ class Runtime:
         self.quiet = quiet
         self.json_out = json_out
         self.prices = C.load_prices(cfg)
+        try:
+            self.budget_usd = max(0.0, float(C.get(cfg, "budget.usd", 0) or 0))
+        except (TypeError, ValueError):
+            self.budget_usd = 0.0
+        self.budget_hit = False
         self.redact = hygiene.make_redactor(cfg)
         self.debug_http = httpdebug.enabled(cfg)   # F4 --debug-http / env var
         key = C.load_key(cfg) or ""
@@ -100,6 +105,8 @@ class Runtime:
             from .tui import Tui
             ui = Tui(quiet=quiet, json_out=json_out, verbose=verbose)
         self.ui = ui
+        self.web_cache: dict = {}          # F14: per-run web tool memo
+        self.web_cache_lock = threading.RLock()
         self.journal = None
         self.run_id = None
         self.run_meta: dict = {}
@@ -214,6 +221,8 @@ class Runtime:
         return agent
 
     def start_run(self, task: str, name: str = None, lead_model: str = None) -> Agent:
+        with self.web_cache_lock:
+            self.web_cache.clear()
         self.run_id = J.new_run_id()
         self.journal = J.Journal(self.run_id, self.cfg, sink=self.ui.event,
                                  redact=self.redact)
@@ -254,6 +263,8 @@ class Runtime:
             raise SystemExit("hydra: no runs to resume")
         data = J.load_run(rid) or {}
         events = J.read_events(rid)
+        with self.web_cache_lock:
+            self.web_cache.clear()
         self.run_id = rid
         self.journal = J.Journal(rid, self.cfg, sink=self.ui.event,
                                  redact=self.redact, seq0=len(events))
@@ -308,6 +319,15 @@ class Runtime:
             self.ui.info(f"({exc})")
             self._hook("error", lead, f"{type(exc).__name__}: {exc}")
             return 1, (lead.report or {})
+        except Limits.BudgetExceeded as exc:
+            self.budget_hit = True
+            self.run_meta.update({"status": "parked", "exit_code": 75})
+            self.ui.info(f"\nParked: {exc}")
+            self.ui.info("Continue with a higher cap:  hydra resume --budget-usd M")
+            if C.get(self.cfg, "termux.notify_on_park", True):
+                self.notify("HYDRA parked", "Budget limit reached. hydra resume")
+            self._hook("park", lead, str(exc))
+            return 75, (lead.report or {})
         except AllModelsFailed as exc:
             parked = bool(getattr(exc, "all_paid", False))
             self.run_meta.update({"status": "parked" if parked else "failed",
@@ -366,6 +386,17 @@ class Runtime:
         return self._execute(lead)
 
     # -------------------------------------------------- usage / close
+    def budget_exceeded(self) -> bool:
+        """True once this run's ledger reaches the opt-in cap (fail open)."""
+        if self.budget_usd <= 0:
+            return False
+        try:
+            spent = sum(float(r.get("est_usd", 0.0))
+                        for r in J.read_usage(self.run_id))
+        except Exception:
+            return False
+        return spent >= self.budget_usd
+
     def usage_totals(self, run_id: str = None) -> dict:
         recs = J.read_usage(run_id or self.run_id)
         tin = sum(int(r.get("in", 0)) for r in recs)
