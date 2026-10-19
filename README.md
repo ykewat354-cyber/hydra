@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.1.0).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 126 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.1 adds the full-screen TUI, research deliverable enforcement, and a raw web-fetch fallback.
+> **Status: implemented (v1.1.1).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 126 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.1 adds the full-screen TUI, research deliverable enforcement, and a raw web-fetch fallback.
 
 ### Install (one line)
 
@@ -578,7 +578,7 @@ JSON-only replies are converted to readable fields, never dumped as braces), too
 calls collapse to one line, and the composer stays open while the run continues.
 
 ```
- HYDRA  1.1.0                    r_1019_0133 ~/proj · gpt-oss:120b · $0.0015  ● ready
+ HYDRA  1.1.1                    r_1019_0133 ~/proj · gpt-oss:120b · $0.0015  ● ready
  ❯ scrape the top 20 HN stories into hn.json and write summary.md
  ● bash  python fetch_hn.py
    ✓ 20 stories · 1.2s
