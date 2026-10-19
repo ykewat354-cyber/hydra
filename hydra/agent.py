@@ -53,9 +53,11 @@ def _render_digest(obj: dict) -> str:
         vals = obj.get(key) or []
         if isinstance(vals, str):
             vals = [vals]
+        lines.append(label + ":")
         if vals:
-            lines.append(label + ":")
             lines += [f"- {v}" for v in vals]
+        else:
+            lines.append("- (none)")
     return "\n".join(lines)
 
 
@@ -361,11 +363,47 @@ class Agent:
             blob = str(self.messages)
         return int(len(blob) / 3.5)
 
+    def _tools_json(self, rt) -> str:
+        try:
+            return json.dumps(rt.tools.schemas_for(self), ensure_ascii=False)
+        except Exception:
+            return "[]"
+
+    def prompt_tokens(self, rt) -> int:
+        """Full prompt estimate: messages + tool schemas (both always sent)."""
+        try:
+            blob = json.dumps(self.api_messages(), ensure_ascii=False)
+        except Exception:
+            blob = str(self.messages)
+        return int((len(blob) + len(self._tools_json(rt))) / 3.5)
+
+    def pinned_tokens(self, rt) -> int:
+        """The pinned prefix (system prompt + env/task + tool schemas).
+
+        Compaction can never remove it, so it must be counted in the estimate;
+        a small working_ctx can otherwise be dominated by this prefix alone.
+        """
+        try:
+            head = json.dumps(self.api_messages()[:2], ensure_ascii=False)
+        except Exception:
+            head = str(self.system_prompt)
+        return int((len(head) + len(self._tools_json(rt))) / 3.5)
+
     def maybe_compact(self, rt) -> bool:
-        """Compact at turn boundaries only, when the estimate crosses compact_at."""
+        """Compact at turn boundaries only, when the full prompt crosses
+        ``compact_at`` of ``working_ctx``.
+
+        The estimate includes the pinned prefix (system prompt, env and tool
+        schemas): it is always sent, so it must count against the window. A
+        minimum turn gap between compactions stops thrash.
+        """
         limit = int(C.get(rt.cfg, "loop.working_ctx", 48000) or 48000)
         at = float(C.get(rt.cfg, "loop.compact_at", 0.75) or 0.75)
-        if self.estimate_tokens() < int(limit * at):
+        gap = max(1, int(C.get(rt.cfg, "loop.compact_min_gap", 3) or 3))
+        last = int(self.data.get("last_compact_turn") or 0)
+        if last and self.turns - last < gap:
+            return False
+        if self.prompt_tokens(rt) < int(limit * at):
             return False
         return self.compact(rt)
 
@@ -382,22 +420,50 @@ class Agent:
             groups.append(cur)
         return groups
 
-    def compact(self, rt, keep_last: int = 6) -> bool:
-        """Summarizer replaces the oldest turns with one state digest (§6)."""
+    def compact(self, rt, keep_last: int = None) -> bool:
+        """Summarizer replaces the oldest turns with one state digest (§6).
+
+        The pinned prefix (system prompt + env + tool schemas) survives every
+        compaction; estimates are recorded on the full prompt so the trigger
+        and the result are comparable. The kept tail is shrunk until the full
+        prompt fits ``loop.compact_to`` (best effort: a pinned prefix that is
+        already over that target leaves just one recent turn).
+        """
         groups = self._turn_groups()
-        if len(groups) <= keep_last + 1:
+        # A digest plus one kept turn is the minimum useful result: retiring a
+        # single turn cannot pay for the summarizer call, so wait for two.
+        if len(groups) < 3:
             return False
+        if keep_last is None:
+            keep_last = int(C.get(rt.cfg, "loop.compact_keep", 6) or 6)
+        keep_last = max(1, min(int(keep_last), len(groups) - 2))
+        limit = int(C.get(rt.cfg, "loop.working_ctx", 48000) or 48000)
+        to = float(C.get(rt.cfg, "loop.compact_to", 0.35) or 0.35)
+        pinned = self.pinned_tokens(rt)
+        target = max(0, int((limit - pinned) * to))
         old, keep = groups[:-keep_last], groups[-keep_last:]
         old_msgs = [m for g in old for m in g]
-        before = self.estimate_tokens()
+        before = self.prompt_tokens(rt)
         digest = self._summarize(rt, old_msgs)
+        # shrink the retained tail until the conversation fits compact_to
+        while keep_last > 1:
+            trial = [{"role": "user", "content": digest}] + \
+                [m for g in keep for m in g]
+            chars = len(json.dumps(trial, ensure_ascii=False))
+            if int(chars / 3.5) <= target:
+                break
+            keep_last -= 1
+            keep = groups[-keep_last:]
         self.messages = [{"role": "user", "content": digest}] + \
             [m for g in keep for m in g]
+        self.data["last_compact_turn"] = int(self.turns)
         if self.journal is not None:
             self.journal.event("compact", self.id, retired=len(old_msgs),
                                kept=len(self.messages) - 1,
                                digest_chars=len(digest),
-                               est_before=before, est_after=self.estimate_tokens())
+                               turn=self.turns, pinned_tokens=pinned,
+                               est_before=before,
+                               est_after=self.prompt_tokens(rt))
         return True
 
     def _summarize(self, rt, old_msgs: list) -> str:

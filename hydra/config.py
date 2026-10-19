@@ -31,6 +31,8 @@ DEFAULTS: dict = {
         "working_ctx": 48000,
         "compact_at": 0.75,
         "compact_to": 0.35,
+        "compact_keep": 6,
+        "compact_min_gap": 3,
         "tool_cap": 6000,
         "tool_timeout": 120,
         "parallel_tools": 4,
@@ -134,6 +136,8 @@ max_turns       = 0               # 0 = unlimited
 working_ctx     = 48000
 compact_at      = 0.75
 compact_to      = 0.35
+compact_keep    = 6               # recent turns kept verbatim after a compaction
+compact_min_gap = 3               # minimum turns between two compactions
 tool_cap        = 6000
 tool_timeout    = 120
 parallel_tools  = 4
