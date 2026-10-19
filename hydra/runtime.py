@@ -1,6 +1,7 @@
 """Runtime: wires config, client, router, journal, tools, agents and the TUI."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -108,6 +109,7 @@ class Runtime:
         self.web_cache: dict = {}          # F14: per-run web tool memo
         self.web_cache_lock = threading.RLock()
         self.journal = None
+        self._pending_niceties: list = []
         self.run_id = None
         self.run_meta: dict = {}
         self.env_block = None
@@ -182,12 +184,55 @@ class Runtime:
             self._job_seq = max(self._job_seq, mx)
 
     # -------------------------------------------------- termux niceties
-    def wake_lock(self) -> None:
-        if C.get(self.cfg, "termux.wake_lock", True) and shutil.which("termux-wake-lock"):
+    def _record_nicety(self, kind: str, ok: bool, returncode: int,
+                       title: str = None) -> None:
+        """Append one evidence line to ~/.hydra/niceties.jsonl and journal it.
+
+        Called before a run journal exists (wake_lock), so events are buffered
+        and flushed into the journal as soon as the run starts.
+        """
+        rec = {"ts": round(time.time(), 3), "kind": kind,
+               "ok": bool(ok), "returncode": int(returncode)}
+        if title is not None:
+            rec["title"] = str(title)[:60]
+        try:
+            p = C.home() / "niceties.jsonl"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+        fields = {"ok": rec["ok"], "returncode": rec["returncode"]}
+        if "title" in rec:
+            fields["title"] = rec["title"]
+        if self.journal:
             try:
-                subprocess.run(["termux-wake-lock"], timeout=10)
+                self.journal.event(kind, None, **fields)
             except Exception:
                 pass
+        else:
+            self._pending_niceties.append((kind, fields))
+
+    def _flush_pending_niceties(self) -> None:
+        pending, self._pending_niceties = self._pending_niceties, []
+        if not self.journal:
+            return
+        for kind, fields in pending:
+            try:
+                self.journal.event(kind, None, **fields)
+            except Exception:
+                pass
+
+    def wake_lock(self) -> None:
+        if not (C.get(self.cfg, "termux.wake_lock", True)
+                and shutil.which("termux-wake-lock")):
+            return
+        rc = -1
+        try:
+            rc = int(subprocess.run(["termux-wake-lock"], timeout=10).returncode)
+        except Exception:
+            pass
+        self._record_nicety("wake_lock", rc == 0, rc)
 
     def wake_unlock(self) -> None:
         if shutil.which("termux-wake-unlock"):
@@ -197,12 +242,17 @@ class Runtime:
                 pass
 
     def notify(self, title: str, content: str) -> None:
-        if shutil.which("termux-notification"):
-            try:
-                subprocess.run(["termux-notification", "-t", str(title)[:60],
-                                "-c", str(content)[:200]], timeout=10)
-            except Exception:
-                pass
+        title = str(title)[:60]
+        if not shutil.which("termux-notification"):
+            return
+        rc = -1
+        try:
+            rc = int(subprocess.run(
+                ["termux-notification", "-t", title,
+                 "-c", str(content)[:200]], timeout=10).returncode)
+        except Exception:
+            pass
+        self._record_nicety("notify", rc == 0, rc, title=title)
 
     # -------------------------------------------------- run lifecycle
     def _attach_http_log(self) -> None:
@@ -226,6 +276,7 @@ class Runtime:
         self.run_id = J.new_run_id()
         self.journal = J.Journal(self.run_id, self.cfg, sink=self.ui.event,
                                  redact=self.redact)
+        self._flush_pending_niceties()
         self._attach_http_log()
         self.router.journal = self.journal
         self.env_block = build_env_block(self.cwd, self.cfg, role="lead",
@@ -268,6 +319,7 @@ class Runtime:
         self.run_id = rid
         self.journal = J.Journal(rid, self.cfg, sink=self.ui.event,
                                  redact=self.redact, seq0=len(events))
+        self._flush_pending_niceties()
         self._attach_http_log()
         self.router.journal = self.journal
         self.cwd = Path(data.get("cwd") or self.cwd)

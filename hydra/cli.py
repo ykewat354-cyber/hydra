@@ -39,6 +39,7 @@ usage:  hydra                       open the full-screen TUI (works from any fol
         hydra -i                    same TUI (interactive)
         hydra --plain "task"        compact stream in this terminal (scripts)
         hydra --detach "task"       tmux/new-session, survives closing Termux
+        hydra --detach --notify "task"  also notify when the run finishes
         hydra <command> [args]
 
 The TUI: assistant text streams live, tool calls collapse to one line
@@ -106,6 +107,7 @@ class Opts:
         self.max_inflight = None
         self.wait_reset = False
         self.detach = False
+        self.notify = False
         self.continue_ = False
         self.interactive = False
         self.plain = False
@@ -159,6 +161,8 @@ def _parse(argv):
             o.debug_http = True
         elif a == "--detach":
             o.detach = True
+        elif a == "--notify":
+            o.notify = True
         elif a == "--continue":
             o.continue_ = True
         elif a in ("-i", "--interactive"):
@@ -348,6 +352,8 @@ def _key_preflight(cfg) -> bool:
 def cmd_run(cfg, task, o) -> int:
     if not _key_preflight(cfg):
         return 2
+    if getattr(o, "notify", False):
+        C.set_path(cfg, "termux.notify_on_finish", True)
     if o.detach:
         return _spawn_detached(cfg, task, o)
     from .runtime import Runtime
@@ -567,6 +573,8 @@ def _spawn_detached(cfg, task, o) -> int:
         args += ["--wait-reset"]
     if o.debug_http:
         args += ["--debug-http"]
+    if o.notify:
+        args += ["--notify"]
     cmd = [sys.executable, "-m", "hydra"] + args + [task]
     env = dict(os.environ)
     env["HYDRA_DETACHED"] = "1"
