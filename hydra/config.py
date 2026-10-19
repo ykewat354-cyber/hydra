@@ -44,6 +44,7 @@ DEFAULTS: dict = {
     },
     "routing": {
         "default": "fallback",
+        "json_policy": "cheapest_conformant",  # or "role_chain" (F1)
         "breaker_fails": 3,
         "breaker_cooldown": 300,
     },
@@ -145,6 +146,7 @@ report_cap      = 1600
 
 [routing]
 default           = "fallback"
+json_policy       = "cheapest_conformant"   # or "role_chain" (F1 structured calls)
 breaker_fails     = 3
 breaker_cooldown  = 300
 
@@ -324,6 +326,13 @@ def load_prices(cfg=None) -> dict:
         except Exception:
             pass
     return prices
+
+
+def est_usd(prices: dict, model: str, tin: int = 0, tout: int = 0) -> float:
+    """HYDRA's only price helper, shared by the router ledger and T07/F1."""
+    p = (prices or {}).get(model) or {}
+    return (int(tin) * float(p.get("in", 0)) +
+            int(tout) * float(p.get("out", 0))) / 1e6
 
 
 def ensure_home(cfg=None) -> None:

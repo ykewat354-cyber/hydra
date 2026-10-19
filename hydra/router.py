@@ -195,13 +195,21 @@ class Router:
     # ------------------------------------------------------------ chat
     def chat(self, messages: list, role: str = "lead", tools=None, think=None,
              agent=None, exclude=(), mode=None, on_delta=None,
-             model: str = None, format=None) -> "client.Reply":
+             model: str = None, format=None, chain_override=None) -> "client.Reply":
         hint = model or (getattr(agent, "model_override", None)
                          if agent is not None else None)
         if tools:
             format = None  # §19.10: never combine format with tools
-        chain = self.chain_for(role, exclude, need_tools=bool(tools),
-                               model_hint=hint, need_json=bool(format))
+        if chain_override:
+            # F1: jsonroute hands us exactly the candidates it wants tried
+            chain = list(chain_override)
+            if exclude:
+                filtered = [m for m in chain if m not in exclude]
+                if filtered:
+                    chain = filtered
+        else:
+            chain = self.chain_for(role, exclude, need_tools=bool(tools),
+                                   model_hint=hint, need_json=bool(format))
         errors = []
         all_paid = True
         if not chain:

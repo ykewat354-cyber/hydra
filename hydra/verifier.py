@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 
 from . import config as C
-from .agent import load_prompt, parse_json_blob
+from .agent import load_prompt
 from .ui_format import issue_text, short as _short
 
 # §19.10 structured output: tool-less verifier calls use a JSON schema.
@@ -155,10 +155,13 @@ def check(rt, agent) -> dict:
         "\n\nEVIDENCE (recent tool calls with outputs, oldest first):\n" +
         ("\n\n".join(evidence) or "(none)"))
     prompt = base + "\n\n" + claim
+    from . import jsonroute
     try:
-        reply = rt.router.chat([{"role": "user", "content": prompt}],
-                               role="reviewer", model=model, agent=agent,
-                               think="low", format=VERDICT_SCHEMA)
+        res = jsonroute.structured_chat(
+            rt.router, [{"role": "user", "content": prompt}], role="reviewer",
+            schema=VERDICT_SCHEMA, schema_name="verdict", think="low",
+            agent=agent, exclude=(producer,) if producer else (),
+            model_hint=model)
     except Exception as exc:
         if rt.journal:
             try:
@@ -168,7 +171,17 @@ def check(rt, agent) -> dict:
                 pass
         return {"verdict": "pass", "issues": [], "model": model,
                 "note": f"verifier unavailable: {exc}"}
-    obj = parse_json_blob(reply.content or "")
+    if res.reply is None:
+        if rt.journal:
+            try:
+                rt.journal.event("verify", agent.id, verdict="skipped",
+                                 error=str(res.error)[:200])
+            except Exception:
+                pass
+        return {"verdict": "pass", "issues": [], "model": model,
+                "note": f"verifier unavailable: {res.error}"}
+    reply = res.reply
+    obj = res.obj
     verdict, issues = "pass", []
     if isinstance(obj, dict):
         if str(obj.get("verdict") or "pass").lower() == "fail":

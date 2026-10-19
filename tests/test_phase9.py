@@ -74,16 +74,21 @@ class ChunkedStreamTests(unittest.TestCase):
 
 class PlannerToleranceTests(unittest.TestCase):
     def test_bare_list_of_steps_is_accepted(self):
+        from hydra import config as C
         from hydra import planner
+        from hydra.client import Reply
+        from hydra.router import Router
 
-        class Router:
-            def chat(self, *a, **k):
-                return SimpleNamespace(content=json.dumps([
+        class Client:
+            def chat(self, model, messages, **kwargs):
+                return Reply(model=model, content=json.dumps([
                     {"id": 1, "title": "Create file", "deps": [], "role": "coder"},
                     {"id": 2, "title": "Run it", "deps": [1], "role": "tester"},
                 ]))
 
-        dag, err = planner.make_dag(SimpleNamespace(router=Router()), "do the thing")
+        cfg = C.load_config(overrides=['roles.planner.chain=["m"]'])
+        rt = SimpleNamespace(router=Router(cfg, client=Client()))
+        dag, err = planner.make_dag(rt, "do the thing")
         self.assertEqual(err, "")
         self.assertEqual([s["title"] for s in dag["steps"]],
                          ["Create file", "Run it"])

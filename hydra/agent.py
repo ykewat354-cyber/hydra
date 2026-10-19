@@ -412,11 +412,13 @@ class Agent:
             self._digest_input(old_msgs))
         text = ""
         try:
-            reply = rt.router.chat([{"role": "user", "content": prompt}],
-                                   role="summarizer", think="off",
-                                   format=DIGEST_SCHEMA)
-            text = (reply.content or "").strip()
-            obj = parse_json_blob(text)
+            from . import jsonroute
+            res = jsonroute.structured_chat(
+                rt.router, [{"role": "user", "content": prompt}],
+                role="summarizer", schema=DIGEST_SCHEMA, schema_name="digest",
+                think="off", agent=self, task=getattr(self, "task", ""))
+            text = (res.reply.content or "").strip() if res.reply else ""
+            obj = res.obj
             if isinstance(obj, dict) and (obj.get("goal") or obj.get("status")):
                 text = _render_digest(obj)
         except Exception:
@@ -433,10 +435,12 @@ class Agent:
             prompt = ("A sub-agent ended without calling finish. Write its report "
                       "from the transcript tail below. Return the JSON object only.\n\n"
                       + tail)
-            reply = rt.router.chat([{"role": "user", "content": prompt}],
-                                   role="summarizer", think="off",
-                                   format=REPORT_SCHEMA)
-            obj = parse_json_blob(reply.content or "")
+            from . import jsonroute
+            res = jsonroute.structured_chat(
+                rt.router, [{"role": "user", "content": prompt}],
+                role="summarizer", schema=REPORT_SCHEMA, schema_name="report",
+                think="off", agent=self, task=getattr(self, "task", ""))
+            obj = res.obj
             if isinstance(obj, dict) and str(obj.get("summary") or "").strip():
                 self.set_report(str(obj.get("status") or "partial"),
                                 str(obj.get("summary")),

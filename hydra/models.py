@@ -132,6 +132,18 @@ class ModelRegistry:
         e["think_checked_at"] = time.time()
         self.save()
 
+    def set_json_class(self, model: str, json_class: str, **extra) -> None:
+        """T07: store measured structured-output conformance (strict|tolerant|no)."""
+        e = self.data.setdefault("models", {}).setdefault(model, {})
+        e["json_class"] = json_class
+        e["json_checked_at"] = time.time()
+        e.update(extra)
+        self.save()
+
+    def json_class_of(self, model: str) -> str:
+        cls = self.entry(model).get("json_class")
+        return cls if cls in ("strict", "tolerant", "no") else "unknown"
+
     def save(self) -> None:
         self.data["updated"] = time.time()
         self.path.parent.mkdir(parents=True, exist_ok=True)

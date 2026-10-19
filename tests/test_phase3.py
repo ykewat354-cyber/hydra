@@ -128,12 +128,12 @@ class CompactTests(Base):
                  for i in range(turns)]
         nodes.append(finish_node("200 turns done"))
         self.srv.add("gpt-oss:120b", *nodes)
-        for _ in range(20):  # summarizer replies (wildcard queue)
-            self.srv.add("*", {"content":
-                               "GOAL: keep doing unique work\nSTATUS: mid\n"
-                               "DECISIONS: none\nFILES: none\n"
-                               "COMMANDS: glob probes\nFINDINGS: none\n"
-                               "BLOCKERS: none\nNEXT: continue"})
+        digest = {"content": json.dumps({
+            "goal": "keep doing unique work", "status": "mid",
+            "decisions": [], "files": [], "commands": ["glob probes"],
+            "findings": [], "blockers": [], "next": ["continue"]})}
+        for _ in range(20):  # summarizer replies (wildcard queue, DIGEST_SCHEMA)
+            self.srv.add("*", digest)
         rt = Runtime(self.cfg(f"loop.working_ctx={small}"), cwd=self.cwd.name,
                      quiet=True)
         sizes = []

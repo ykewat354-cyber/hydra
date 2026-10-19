@@ -6,8 +6,6 @@ if that also fails the caller just falls back to plain steering.
 """
 from __future__ import annotations
 
-from .agent import parse_json_blob
-
 DAG_SCHEMA = {
     "type": "object",
     "properties": {
@@ -34,12 +32,13 @@ def make_dag(rt, task: str, role: str = "planner"):
         "id (int), title (imperative, one line), deps (list of step ids that must "
         "finish first) and role (worker|coder|researcher|debugger|tester|reviewer). "
         "3-9 steps, no prose. Return JSON only.\n\nTASK:\n" + task[:4000])
-    try:
-        reply = rt.router.chat([{"role": "user", "content": prompt}],
-                               role=role, think="low", format=DAG_SCHEMA)
-    except Exception as exc:
-        return None, f"planner unavailable: {type(exc).__name__}: {exc}"
-    obj = parse_json_blob(reply.content or "")
+    from . import jsonroute
+    res = jsonroute.structured_chat(
+        rt.router, [{"role": "user", "content": prompt}], role=role,
+        schema=DAG_SCHEMA, schema_name="plan", think="low", task=task)
+    if res.obj is None:
+        return None, f"planner unavailable: {res.error}"
+    obj = res.obj
     # Models frequently ignore the wrapper: accept a bare list of steps too.
     if isinstance(obj, list):
         obj = {"goal": task.strip().splitlines()[0][:160] if task.strip() else "", "steps": obj}
