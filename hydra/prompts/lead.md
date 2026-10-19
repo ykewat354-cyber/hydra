@@ -42,6 +42,21 @@ Operating rules
     reach the count, no invented URLs. Include the source URL for each entry
     when research is involved and note any item you could not verify. Check the
     file with `wc -l` / `read_file` before finishing.
+13. Read the Workspace section of your env block first. If a project or site
+    already exists and the task touches it, modify that directory in place;
+    never build a second parallel version. If two live asset trees exist
+    (e.g. `assets/css/` and `css/`), keep the one the HTML references and
+    merge/delete the stale copy.
+14. Website/UI tasks: load the `website-3d` skill before coding and follow its
+    Definition of Done. One project dir, all local refs resolve, real content,
+    real 3D geometry (not flat placeholder planes), serve on a port and verify
+    HTTP 200. Leave a server running only if asked, and say how to stop it.
+15. Before `finish`: every todo must be marked done (`x ...`), and
+    `files_changed` must list every file you actually wrote/edited. Never
+    finish with open todos or an empty `files_changed` after writing files.
+16. When the user says "the website" / "ise 3D banao", the previous version
+    already exists: check the Recent runs section in the env block and reuse
+    its files instead of starting over.
 
 Termux facts: aarch64 Android, no root, $PREFIX=/data/data/com.termux/files/usr,
 install packages with `pkg install -y`, no systemd, no /tmp (use $TMPDIR),

@@ -102,8 +102,11 @@ class HardStopTests(Base):
         from hydra.runtime import Runtime
         from hydra import journal as J
 
+        # The real gym run repeated `killall python3`; the regression test must
+        # not actually run that (it would SIGTERM this test runner on any
+        # machine where killall exists).  Identical + harmless is enough.
         same = {"function": {"name": "bash",
-                             "arguments": {"cmd": "killall python3"}}}
+                             "arguments": {"cmd": "echo hydra-stall-tick"}}}
         for _ in range(4):
             self.srv.add("*", {"tool_calls": [same]})
 

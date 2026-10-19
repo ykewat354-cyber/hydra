@@ -60,9 +60,14 @@ def _tool_recall(args, ctx):
 def _tool_finish(args, ctx):
     status = str(args.get("status") or "done")
     summary = str(args.get("summary") or "")
+    files = args.get("files_changed")
+    if not files:
+        # An empty files_changed while the executor recorded writes is exactly
+        # the reporting gap the 3D gym run showed; fill it from reality.
+        files = list(ctx.agent.data.get("files_written") or [])
     ctx.agent.set_report(
         status, summary,
-        files_changed=args.get("files_changed"),
+        files_changed=files,
         commands_run=args.get("commands_run"),
         findings=args.get("findings"),
         open_issues=args.get("open_issues"),

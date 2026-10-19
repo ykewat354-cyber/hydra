@@ -158,7 +158,10 @@ def build_env_block(cwd, cfg=None, role: str = None, project_cap: int = None,
         lines.append(bat)
     if cfg is not None:
         from . import config as C
-        from .project import project_text, skills_listing
+        from .project import environment_summary, project_text, skills_listing
+        ws = environment_summary(cwd, cfg)
+        if ws.strip():
+            lines.append("\n" + ws)
         cap = project_cap
         if cap is None:
             cap = int(C.get(cfg, "project.max_chars", 8000) or 8000)

@@ -194,12 +194,22 @@ def probe_one(client, gate, model: str) -> dict:
         return res
     res["ms"] = int((time.time() - t0) * 1000)
 
-    # tool calling
+    # tool calling: native tool_calls first, then the same tolerant text
+    # parser the loop uses.  Without the second half the registry wrongly
+    # marks models that emit JSON/<tool_call> blocks (gpt-oss:120b) as
+    # tool-incapable and the router prunes them.
     try:
         with gate.slot(0):
             r = client.chat(model, TOOL_MSG, tools=[ADD_TOOL],
                             options={"num_predict": 64})
-        for tc in r.tool_calls:
+        candidates = list(r.tool_calls or [])
+        if not candidates:
+            try:
+                from .agent import parse_text_calls
+                candidates = parse_text_calls(r.content or "")
+            except Exception:
+                candidates = []
+        for tc in candidates:
             fn = (tc.get("function") or {})
             if fn.get("name") == "add":
                 res["tools"] = True

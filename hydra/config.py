@@ -79,6 +79,11 @@ DEFAULTS: dict = {
         "instruction_files": ["HYDRA.md", "AGENTS.md"],
         "max_chars": 8000,
         "subagent_chars": 2000,
+        "workspace": True,        # env block: entries + projects + recent files
+        "workspace_entries": 16,
+        "workspace_projects": 5,
+        "workspace_recent": 6,
+        "recent_runs": 3,         # same-cwd run summaries; 0 = off
     },
     "autoverify": {
         "enabled": True,
@@ -182,6 +187,11 @@ usd = 0.0                         # 0 = off; opt-in spend cap per run
 instruction_files = ["HYDRA.md", "AGENTS.md"]
 max_chars         = 8000
 subagent_chars    = 2000
+workspace         = true          # env block: entries + projects + recent files
+workspace_entries = 16            # top-level entries listed
+workspace_projects= 5             # project dirs described via marker files
+workspace_recent  = 6             # most recently modified files listed
+recent_runs       = 3             # same-cwd run summaries; 0 = off
 
 [autoverify]
 enabled = true

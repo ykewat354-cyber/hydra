@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.1.1).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 126 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.1 adds the full-screen TUI, research deliverable enforcement, and a raw web-fetch fallback.
+> **Status: implemented (v1.2.2).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 260 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.2.2 adds workspace/recent-run context, a built-in website-3D skill, truthful `files_changed`, and verifier checks for duplicate asset trees and open todos.
 
 ### Install (one line)
 
@@ -21,6 +21,9 @@ curl -fsSL https://raw.githubusercontent.com/ykewat354-cyber/hydra/main/install-
 That clones/updates `~/hydra`, installs `$PREFIX/bin/hydra`, and runs `hydra doctor`.
 Then: `hydra models probe` → `hydra` (opens the TUI) or `hydra "your task"`.
 
+**v1.2.2 (coding root fix):** workspace + recent-run context in the env block,
+built-in `website-3d` skill, `finish` auto-fills `files_changed`, verifier
+catches duplicate asset trees and open todos, probe counts text tool calls.
 **v1.2.1 (bugfix):** bounded shell timeouts, hard loop breaker, deterministic
 code/host checks before verification. **v1.2.0:** `hydra report --last` ·
 `hydra models bench` / `tune` · `hydra doctor --limits|--caps|--full` ·

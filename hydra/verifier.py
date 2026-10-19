@@ -11,6 +11,7 @@ verifier crash is reported but not fatal.
 from __future__ import annotations
 
 import html.parser
+import os
 import re
 import shutil
 import subprocess
@@ -241,19 +242,84 @@ def _url_issues(agent, has_html):
     return issues
 
 
+def _pending_todo_issues(agent) -> list:
+    """A `done` finish with unfinished todos is not done (gym-3D run: 0/4)."""
+    rep = agent.report or {}
+    if str(rep.get("status") or "done") != "done":
+        return []
+    pending = []
+    for t in (agent.data.get("todos") or []):
+        s = str(t).strip()
+        if s and not s.lower().startswith("x "):
+            pending.append(s)
+    if not pending:
+        return []
+    shown = "; ".join(p[:80] for p in pending[:3])
+    more = f" (+{len(pending) - 3} more)" if len(pending) > 3 else ""
+    return [{
+        "what": f"finish status is done but {len(pending)} todo item(s) are "
+                f"still open: {shown}{more}",
+        "fix": "finish the work and mark each item 'x <item>' (or set status "
+               "partial and list it in open_issues)",
+    }]
+
+
+def _dir_has_files(path: Path) -> bool:
+    try:
+        for _root, dirs, files in os.walk(path):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules")]
+            if files:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+_DUP_ASSET_PAIRS = (
+    ("assets/css", "css"), ("assets/css", "styles"), ("assets/js", "js"),
+    ("assets/js", "scripts"), ("assets/img", "img"), ("assets/img", "images"),
+    ("assets/images", "images"), ("assets/fonts", "fonts"),
+)
+
+
+def _duplicate_asset_issues(workdir, html_path) -> list:
+    """Two live copies of the same asset tree confuse every later edit."""
+    try:
+        root = Path(html_path).parent
+    except Exception:
+        return []
+    issues = []
+    for a, b in _DUP_ASSET_PAIRS:
+        pa, pb = root / a, root / b
+        try:
+            if pa.is_dir() and pb.is_dir() and _dir_has_files(pa) and _dir_has_files(pb):
+                issues.append({
+                    "what": f"{root.name}/ keeps two live asset trees: "
+                            f"{a!r} and {b!r}",
+                    "fix": "keep the one the HTML actually references and "
+                           "merge/delete the stale copy before finishing",
+                })
+        except Exception:
+            continue
+    return issues
+
+
 def deterministic_issues(agent) -> list:
     """Cheap, offline checks that run before the LLM reviewer.
 
     Missing files are left to the existing reviewer so fake/scripted runs keep
     their current behavior.  Existing code artifacts and a claimed localhost
     URL are checked here because an LLM review can miss a dead server or a
-    broken HTML asset link (the gym-site false pass).
+    broken HTML asset link (the gym-site false pass).  Pending todos and
+    duplicate asset trees are checked because the 3D gym run finished 0/4 and
+    left assets/ and css/ side by side.
     """
     rep = agent.report or {}
     paths = list(dict.fromkeys(
         [str(x) for x in (rep.get("artifacts") or [])] +
         [str(x) for x in (rep.get("files_changed") or [])]))
-    issues, checked, has_html = [], 0, False
+    issues = _pending_todo_issues(agent)
+    checked, has_html = 0, False
     for rel in paths:
         if not rel:
             continue
@@ -268,6 +334,7 @@ def deterministic_issues(agent) -> list:
         if suffix in (".html", ".htm"):
             has_html = True
             issues.extend(_html_issues(agent.workdir, rel, p, text))
+            issues.extend(_duplicate_asset_issues(agent.workdir, p))
         elif suffix == ".css":
             issues.extend(_css_issues(rel, text))
         elif suffix == ".js":

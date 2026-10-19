@@ -115,6 +115,10 @@ class TuneTests(unittest.TestCase):
         self.assertNotEqual(bench.family(proposals["critic"][0]),
                             bench.family(proposals["coder"][0]))
         self.assertIn("beta:2b", proposals["critic"])
+        # tune --apply must fix the reviewer too (the slow 155s verifier)
+        self.assertEqual(proposals["reviewer"], proposals["critic"])
+        for role in ("planner", "debugger", "tester", "scribe"):
+            self.assertEqual(proposals[role], proposals["lead"])
 
     def test_render_and_apply(self):
         proposals = bench.propose(self.cells())
@@ -124,6 +128,8 @@ class TuneTests(unittest.TestCase):
             self.assertIn("[roles.lead]", text)
             self.assertIn("alpha:1b", text)
             self.assertIn("[roles.critic]", text)
+            self.assertIn("[roles.reviewer]", text)
+            self.assertIn("[roles.planner]", text)
 
 
 class LayeringTests(unittest.TestCase):

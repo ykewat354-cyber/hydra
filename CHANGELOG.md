@@ -2,6 +2,43 @@
 
 All notable changes to HYDRA. Dates are local (Termux, Android).
 
+## v1.2.2 — 2026-10-19
+
+Root-fix release for the 3D gym-site capability test: HYDRA built a duplicate
+site next to `gym_website/`, used a weak flat-plane 3D demo, left 0/4 todos
+open, reported an empty `files_changed`, and the verifier still passed it.
+These are the structural fixes, not prompt excuses.
+
+### Added
+
+- **Workspace context in the env block** — top-level entries, per-project
+  marker facts (`index.html`, `package.json`, asset dirs), recently modified
+  files, and the last same-cwd runs with their changed files (redacted). A new
+  run can now see that `gym_website/` already exists before it plans.
+- **Built-in `website-3d` skill** — progressive-disclosure recipe shipped in
+  the package: reuse the existing project, no duplicate asset trees, real
+  Three.js geometry/lights/scroll, serve with `background=true`, curl 200.
+  Project/global skills still override the built-in one.
+- **`finish` auto-fills `files_changed`** — the executor records every
+  successful `write_file`/`edit_file`/`apply_patch` path; `finish` uses those
+  when the model omits the list.
+- **Verifier: pending todos + duplicate asset trees** — a `done` finish with
+  open todos, or two live trees (`assets/css` and `css`, `assets/js` and `js`,
+  …), fails deterministically before the LLM reviewer runs.
+- **`hydra models tune --apply` covers more roles** — `reviewer`, `planner`,
+  `debugger`, `tester` and `scribe` are now written too; reviewer gets the
+  diverse-family chain instead of always trying `nemotron-3-ultra` first.
+
+### Fixed
+
+- **Model probe counted only native tool calls** — models that emit a
+  `<tool_call>`/JSON block (measured: `gpt-oss:120b`) were marked
+  `tools:false` and pruned by the router for every tool role. The probe now
+  runs the same tolerant `parse_text_calls` parser as the main loop.
+- **Hard-stop regression test could kill the test runner** — it executed a
+  real `killall python3`; it now repeats a harmless command with the same
+  signature.
+
 ## v1.2.1 — 2026-10-19
 
 Bugfix release for the gym-site capability test: the harness hung on a

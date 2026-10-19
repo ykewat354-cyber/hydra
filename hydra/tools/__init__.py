@@ -6,6 +6,7 @@ exceptions to ``ERROR: <type>: <message>`` + a short traceback tail.
 from __future__ import annotations
 
 import importlib.util
+import re
 import threading
 import time
 import traceback
@@ -13,6 +14,33 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .. import config as C
+
+_PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$", re.M)
+
+
+def _record_writes(agent, name: str, args: dict) -> None:
+    """Remember which files a successful tool call wrote.
+
+    `finish` uses this to auto-fill files_changed, and the verifier can trust
+    the report instead of guessing from prose.
+    """
+    paths = []
+    if name in ("write_file", "edit_file"):
+        p = args.get("path")
+        if p:
+            paths.append(str(p))
+    elif name == "apply_patch":
+        for m in _PATCH_FILE_RE.finditer(str(args.get("patch") or "")):
+            paths.append(m.group(1).strip())
+    if not paths:
+        return
+    try:
+        wrote = agent.data.setdefault("files_written", [])
+        for p in paths:
+            if p and p not in wrote:
+                wrote.append(p)
+    except Exception:
+        pass
 
 
 class Tool:
@@ -229,6 +257,8 @@ class Executor:
         out = []
         for i, (call, content) in enumerate(zip(calls, results)):
             name = call["function"]["name"]
+            if not str(content).startswith("ERROR:"):
+                _record_writes(agent, name, call["function"]["arguments"])
             content = self._cap(content, agent, name)
             if self.rt.redact is not None:
                 content = self.rt.redact(content)  # secrets never reach the model

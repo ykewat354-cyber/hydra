@@ -27,7 +27,13 @@ from . import config as C
 from . import journal as J
 
 TASKS = ("B1", "B2", "B3")
-ROLES = ("lead", "coder", "worker", "researcher", "critic", "summarizer")
+# Roles written by `models tune --apply`. Producer roles share the
+# reliability-first chain; critic/reviewer share the diverse-family chain.
+# planner/debugger/tester/scribe inherit the producer chain so every
+# tool-calling role gets fixed by one apply. vision is left alone: the
+# scorecard does not test image input.
+ROLES = ("lead", "coder", "worker", "researcher", "critic", "summarizer",
+         "reviewer", "planner", "debugger", "tester", "scribe")
 
 B1_TASK = ("Create sum.py that prints the sum of the integers 1 to 100, "
            "run it, then finish.")
@@ -450,8 +456,9 @@ def propose(cells: list) -> dict:
     diff = next((m for m in ranked if family(m) != coder_family), None)
     critic = (([diff] + [m for m in ranked if m != diff])[:3]
               if diff else list(chain))
-    out = {role: list(chain) for role in ROLES}
-    out["critic"] = critic
+    out = {}
+    for role in ROLES:
+        out[role] = list(critic) if role in ("critic", "reviewer") else list(chain)
     return out
 
 
