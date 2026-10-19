@@ -12,6 +12,7 @@ import fnmatch
 import json
 import os
 import subprocess
+from pathlib import Path
 
 from . import config as C
 
@@ -120,7 +121,7 @@ def apply_turn_hooks(rt, agent, calls: list, results: list) -> None:
             cmd_tpl = None
             for pattern, command in globs.items():
                 if fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(
-                        os.path.basename(path), pattern):
+                        Path(path).name, pattern):
                     cmd_tpl = str(command)
                     break
             if not cmd_tpl:
