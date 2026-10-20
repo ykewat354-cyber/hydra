@@ -50,8 +50,8 @@ actually served, and what the verifier cost.
 
 ### Verified
 
-- 405 tests + 176 subtests pass; `hydra eval seed` 10/10; 40 UI goldens
-  regenerated for the cost/footer changes.
+- 405 tests + 176 subtests pass; `hydra eval seed` 10/10; 40 UI golden scenes
+  checked (15 updated for the cost/footer changes).
 - Real smoke (`hello.txt`): 3 turns, 1 agent, verifier `gpt-oss:20b`, 0
   verifier tool calls, `files_changed=["hello.txt"]` (`mixed`, scan complete),
   cost $0.000428 total, verifier share $0.000057 (13%).
