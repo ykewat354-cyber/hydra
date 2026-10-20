@@ -30,7 +30,7 @@ from .client import CallCancelled
 
 COMMANDS = {"run", "resume", "ls", "tail", "tree", "usage", "doctor", "kill",
             "models", "undo", "init", "map", "eval", "daemon", "schedule",
-            "report", "update", "help", "version", "ui-demo"}
+            "report", "update", "help", "version", "ui-demo", "footprint"}
 
 HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud).
 
@@ -62,7 +62,9 @@ commands:
   map [PATH] [BUDGET]   repo map: tree + top-level symbols (cached)
   undo [RUN] [--to N]   restore the workdir from a shadow snapshot
   ui-demo [SCENE]       scripted UI scenes (home/running/done/palette/
-                        stream/unicode/glyphs/all), no API, no credits
+                        stream/unicode/glyphs/all; --cost N previews the
+                        footer colour)
+  footprint             pinned-prompt footprint table (parts sum to total), no API, no credits
   eval [SUITE]          run scripted eval suites on the fake server
   init                  the lead explores the repo and writes HYDRA.md
   doctor                environment checks (--full: deep check, --limits:
@@ -297,6 +299,9 @@ def main(argv=None) -> int:
     if cmd == "ui-demo":
         from . import ui_demo as D
         return D.cli(cfg, rest[1:], o)
+    if cmd == "footprint":
+        from . import footprint as F
+        return F.cli(cfg, rest[1:])
 
     if cmd == "run":
         args = rest[1:]
