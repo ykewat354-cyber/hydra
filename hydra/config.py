@@ -72,6 +72,17 @@ DEFAULTS: dict = {
         "reprobe_days": 7,
     },
     "termux": {"wake_lock": True, "notify_on_finish": True, "notify_on_park": True},
+    "ui": {
+        "mode": "fullscreen",     # inline | fullscreen | plain (WO2 M2 decides)
+        "theme": "auto",          # auto | dark | light
+        "glyphs": "auto",         # auto(=safe) | safe | rich | ascii
+        "density": "auto",        # auto | compact | comfortable
+        "logo": "auto",           # auto | on | off
+        "animations": True,
+        "show_thinking": False,
+        "tool_preview_lines": 0,  # 0 = auto (3 narrow / 6 wide)
+        "mouse": False,           # fullscreen only
+    },
     "daemon": {"poll_secs": 5},
     "park": {"wait_reset": False, "poll_interval": 1800},
     "budget": {"usd": 0.0},          # 0 = off; opt-in per run / [budget] usd

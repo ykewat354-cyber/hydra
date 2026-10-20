@@ -1,0 +1,31 @@
+                                                
+ █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.2.4               
+ █▀█ ▀█▀ █ █ ██▀ █▀█  nemotron-3-super          
+ ▀ ▀  ▀  ▀▀  ▀ ▀ ▀ ▀  free plan · key ✓ loaded  
+                                                
+ ~/gym_website                                  
+                                                
+❯ नमस्ते दुनिया 🙂 — क्या हाल है?                 
+                                                
+नमस्ते! हिन्दी ठीक है। 你好世界 🙂 テスト中文字符 
+क्षत्रिय और प्रणाम — combining marks stay attached.
+                                                
+● read_file  ~/projects/very…नमस्ते/script.js    
+   └ 5 lines                                    
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+                                                
+╭──────────────────────────────────────────────╮
+│ ❯ Ask HYDRA to build, fix, debug or research │
+╰──────────────────────────────────────────────╯
+ / commands · @ files · ! shell     ctx 31% · $0

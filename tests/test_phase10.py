@@ -218,7 +218,10 @@ class AppTests(unittest.TestCase):
         self.assertIn("echo hi", text)
         self.assertNotIn("hidden", text)
         self.assertIn("bash", text)
-        self.assertIn("✓", text)
+        # WO2 §4.6 tool card: bullet + name + summary, result under └, elapsed
+        self.assertIn("● bash  echo hi", text)
+        self.assertIn("└ hi", text)
+        self.assertIn("0.2s", text)
 
     def test_report_and_artifacts_are_visible(self):
         app = self._app()
@@ -233,7 +236,10 @@ class AppTests(unittest.TestCase):
         self.assertIn("Complete list saved.", text)
         self.assertIn("100 unique entries", text)
         self.assertIn("RESEARCH.md", text)
-        self.assertIn("DONE", text)
+        # WO2 §4.6 closing card: title case + labelled rows, not "DONE"
+        self.assertIn("✓ Done", text)
+        self.assertIn("files   RESEARCH.md", text)
+        self.assertNotIn("DONE", text)
 
     def test_input_submit_adds_user_and_history(self):
         app = self._app()

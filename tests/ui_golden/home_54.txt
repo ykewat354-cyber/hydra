@@ -1,0 +1,31 @@
+                                                      
+ █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.2.4                     
+ █▀█ ▀█▀ █ █ ██▀ █▀█  nemotron-3-super                
+ ▀ ▀  ▀  ▀▀  ▀ ▀ ▀ ▀  free plan · key ✓ loaded        
+                                                      
+ ~/gym_website                                        
+                                                      
+ Try  fix the failing tests                           
+      @file attach · !cmd shell · /help               
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+╭────────────────────────────────────────────────────╮
+│ ❯ Ask HYDRA to build, fix, debug or research       │
+╰────────────────────────────────────────────────────╯
+ / commands · @ files · ! shell            ctx 0% · $0

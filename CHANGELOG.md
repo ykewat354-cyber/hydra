@@ -2,6 +2,48 @@
 
 All notable changes to HYDRA. Dates are local (Termux, Android).
 
+## v1.2.4 — 2026-10-20
+
+UI v2, milestone 1 (Work Order #2): a calmer, phone-first look on the existing
+renderer. No behaviour change — rendering only.
+
+### Changed
+
+- **Compact welcome lockup** — the 5-row block banner is gone. Home shows the
+  3-row logo (19 columns) with `HYDRA <version>`, model, plan and key status
+  to its right, the cwd, and a two-line tips block that hides itself after the
+  first message. Below 44 columns the logo drops to one line:
+  `▌HYDRA 1.2.4 · model` (`ui.logo = auto|on|off`).
+- **No painted backgrounds, no italics** — all colour comes from six semantic
+  tokens (`accent`, `muted`, `ok`, `warn`, `err`, `info`) in `hydra/ui_theme.py`;
+  `ui.theme = dark|light|auto` and truecolor/256/16 depth detection.
+- **Glyph tiers** — `safe` (default), `rich`, `ascii`; `--ascii` /
+  `HYDRA_ASCII=1` select ASCII, `hydra ui-demo glyphs` prints every tier.
+- **Live status line** — spinner, verb, elapsed (`14s`, `1m 05s`), `↓ tok`,
+  `esc to stop`; idle screens stay quiet. Footer shows context hints or
+  `ctx NN% · $cost`, and the model name while running.
+- **Tool cards** — `● tool summary` with right-aligned diffstat and elapsed,
+  `└ brief` results, coloured `+/-` diff rows, middle-ellipsis paths.
+- **Honest closing cards** — `✓ Done` / `● Partial` / `✗ Failed` with labelled
+  `files / verify / open / next / why / run` rows; `files not tracked` when the
+  report did not track changes; per-file `+N -M` from real tool calls.
+- **Real cursor at the caret** — the fake block cursor over the placeholder is
+  gone; the terminal cursor is positioned inside the rounded input box.
+- **Mouse capture off by default** — fullscreen still uses the alternate screen
+  and bracketed paste, so native swipe-scroll and long-press copy keep working;
+  `ui.mouse = true` re-enables `?1000h/?1002h/?1006h`.
+- **`hydra ui-demo`** — scripted `home / running / done / partial / failed /
+  palette / stream / unicode / glyphs / all` scenes through the real renderer;
+  `--snapshot --no-color` prints ANSI-free screens (used by the goldens).
+- **New UI flags** — `--ui inline|fullscreen|plain`, `--no-color`, `--compact`.
+
+### Added
+
+- `hydra/ui_theme.py` (tokens, depth, glyph tiers, SGR sanitizers) and
+  `hydra/ui_demo.py` (scenes).
+- `tests/test_ui_v2.py` — golden snapshots (36/48/54/80/120, eight scenes),
+  width/SGR invariants, honesty checks, ascii/plain-mode checks (283 tests).
+
 ## v1.2.3 — 2026-10-19
 
 Second root-fix pass, driven by re-testing the same 3D gym task on the real

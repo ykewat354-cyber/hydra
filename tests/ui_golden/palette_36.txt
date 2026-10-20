@@ -1,0 +1,31 @@
+                                    
+▌HYDRA 1.2.4 · nemotron-3-super     
+                                    
+ ~/gym_website                      
+                                    
+ Try  fix the failing tests         
+      @file attach · !cmd shell · /h
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+ ❯ /model     pin a model: /model […
+   /models    role chains           
+╭──────────────────────────────────╮
+│ ❯ /m                             │
+╰──────────────────────────────────╯
+ ↑↓ select · tab complete           

@@ -30,7 +30,7 @@ from .client import CallCancelled
 
 COMMANDS = {"run", "resume", "ls", "tail", "tree", "usage", "doctor", "kill",
             "models", "undo", "init", "map", "eval", "daemon", "schedule",
-            "report", "update", "help", "version"}
+            "report", "update", "help", "version", "ui-demo"}
 
 HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud).
 
@@ -61,6 +61,8 @@ commands:
   schedule add|ls|rm    periodic jobs fired by the daemon
   map [PATH] [BUDGET]   repo map: tree + top-level symbols (cached)
   undo [RUN] [--to N]   restore the workdir from a shadow snapshot
+  ui-demo [SCENE]       scripted UI scenes (home/running/done/palette/
+                        stream/unicode/glyphs/all), no API, no credits
   eval [SUITE]          run scripted eval suites on the fake server
   init                  the lead explores the repo and writes HYDRA.md
   doctor                environment checks (--full: deep check, --limits:
@@ -76,6 +78,10 @@ flags:
   --budget-usd N        opt-in spend cap; park at N (default: off)
   --continue            resume the last run started in this cwd
   --plain / --no-tui    no full-screen UI; compact stream (auto when piped)
+  --ui MODE             inline | fullscreen | plain (default: config ui.mode)
+  --ascii               ASCII glyph tier (same layout)
+  --no-color            colour off only (same layout)
+  --compact             tighter layout
   --debug-http          append runs/<id>/http.jsonl (or HYDRA_DEBUG_HTTP=1)
   -v / --verbose        show full tool arguments/results in plain mode
   --quiet  --json  --wait-reset
@@ -114,6 +120,10 @@ class Opts:
         self.verbose = False
         self.debug_http = False
         self.budget = None
+        self.ui_mode = None
+        self.ascii = False
+        self.no_color = False
+        self.compact = False
 
 
 def _parse(argv):
@@ -169,6 +179,19 @@ def _parse(argv):
             o.interactive = True
         elif a in ("--plain", "--no-tui"):
             o.plain = True
+        elif a == "--ui":
+            i += 1
+            if i >= len(argv):
+                raise SystemExit("hydra: --ui needs inline|fullscreen|plain")
+            o.ui_mode = argv[i]
+        elif a.startswith("--ui="):
+            o.ui_mode = a.split("=", 1)[1]
+        elif a == "--ascii":
+            o.ascii = True
+        elif a == "--no-color":
+            o.no_color = True
+        elif a == "--compact":
+            o.compact = True
         elif a in ("-v", "--verbose"):
             o.verbose = True
         elif a in ("--version", "-V"):
@@ -194,6 +217,9 @@ def main(argv=None) -> int:
         print(exc)
         return 2
     C.ensure_home()
+    if o.ui_mode not in (None, "inline", "fullscreen", "plain"):
+        print("hydra: --ui must be inline, fullscreen or plain")
+        return 2
     overrides = list(o.sets)
     if o.max_inflight:
         overrides.append(f"api.max_inflight={o.max_inflight}")
@@ -203,6 +229,16 @@ def main(argv=None) -> int:
         overrides.append("park.wait_reset=true")
     if o.debug_http:
         overrides.append("api.debug_http=true")
+    if o.ui_mode:
+        overrides.append(f"ui.mode={o.ui_mode}")
+        if o.ui_mode == "plain":
+            o.plain = True
+    if o.ascii:
+        overrides.append("ui.glyphs=ascii")
+    if o.no_color:
+        os.environ["NO_COLOR"] = "1"
+    if o.compact:
+        overrides.append("ui.density=compact")
     cfg = C.load_config(overrides=overrides)
 
     if o.interactive:
@@ -258,6 +294,9 @@ def main(argv=None) -> int:
     if cmd == "update":
         from . import update as U
         return U.cli(cfg, rest[1:])
+    if cmd == "ui-demo":
+        from . import ui_demo as D
+        return D.cli(cfg, rest[1:], o)
 
     if cmd == "run":
         args = rest[1:]
@@ -313,6 +352,14 @@ def cmd_tui(cfg, o, initial: str = "") -> int:
     """Full-screen UI; falls back to the compact stream when unavailable."""
     if not _key_preflight(cfg):
         return 2
+    mode = str(C.get(cfg, "ui.mode", "") or "")
+    if mode == "plain" or getattr(o, "ui_mode", None) == "plain":
+        if initial:
+            return cmd_run(cfg, initial, o)
+        if o.interactive:
+            return cmd_repl(cfg, o)
+        print(HELP)
+        return 0
     if not _tui_ok(o):
         if initial:
             return cmd_run(cfg, initial, o)

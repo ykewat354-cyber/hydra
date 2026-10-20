@@ -228,8 +228,8 @@ class PtyTerminalStateTests(unittest.TestCase):
                 stdin=slave, stdout=slave, stderr=slave)
         finally:
             os.close(slave)
-        buf = _read_until(master, lambda b: b"\x1b[?1000h" in b, timeout=15)
-        self.assertIn(b"\x1b[?1000h", buf, "TUI never entered full-screen mode")
+        buf = _read_until(master, lambda b: b"\x1b[?1049h" in b, timeout=15)
+        self.assertIn(b"\x1b[?1049h", buf, "TUI never entered full-screen mode")
         return proc, master, buf
 
     def _finish(self, proc, master, buf) -> bytes:

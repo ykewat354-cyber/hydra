@@ -47,6 +47,52 @@ def pad_display(text: str, width: int) -> str:
     return text + " " * max(0, width - display_width(text))
 
 
+def middle_ellipsis(text, width: int) -> str:
+    """Path-style truncation: keep the head and tail, ``…`` in between.
+
+    Cell-aware and cluster-safe: a combining/spacing mark never starts the
+    tail fragment (WO2 §4.7)."""
+    s = str(text or "")
+    width = max(4, int(width))
+    if display_width(s) <= width:
+        return s
+    head_budget = (width - 1) // 2
+    tail_budget = width - 1 - head_budget
+    head, used = "", 0
+    for ch in s:
+        w = char_width(ch)
+        if used + w > head_budget:
+            break
+        head += ch
+        used += w
+    tail, used = "", 0
+    for pos in range(len(s) - 1, -1, -1):
+        ch = s[pos]
+        w = char_width(ch)
+        if used + w > tail_budget:
+            break
+        if _is_join_mark(ch) and tail == "" and pos != len(s) - 1:
+            # a mark must never start the tail fragment, but marks that are
+            # interior or at the end of the string belong to the cluster
+            continue
+        tail = ch + tail
+        used += w
+    if not head:
+        return clip_display(s, width)
+    if not tail:
+        return clip_display(s, width)
+    return head + "…" + tail
+
+
+def end_ellipsis(text, width: int) -> str:
+    """Command-style truncation: cut at the end with an ``…``."""
+    s = " ".join(str(text or "").split())
+    width = max(2, int(width))
+    if display_width(s) <= width:
+        return s
+    return clip_display(s, width - 1) + "…"
+
+
 def short(text, n: int = 90) -> str:
     """Collapse whitespace and cap at n chars."""
     s = " ".join(str(text if text is not None else "").split())
@@ -90,6 +136,22 @@ def fmt_duration(seconds) -> str:
     h, rem = divmod(s, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def fmt_elapsed(seconds) -> str:
+    """Elapsed text for the live UI: ``0.1s``, ``14s``, ``1m 05s`` (§4.7)."""
+    try:
+        s = max(0.0, float(seconds or 0))
+    except Exception:
+        s = 0.0
+    if s < 10:
+        if abs(s - round(s)) < 0.05:
+            return f"{int(round(s))}s"
+        return f"{s:.1f}s"
+    if s < 60:
+        return f"{int(s)}s"
+    m, sec = divmod(int(s), 60)
+    return f"{m}m {sec:02d}s"
 
 
 def fmt_money(value) -> str:
@@ -382,12 +444,14 @@ def markdown_rows(text: str, width: int, max_code_lines: int = 80) -> list:
                 code_left = max_code_lines
             else:
                 add_blank()
+                lang = line.strip()[3:].strip()
+                rows.append(("│ " + (lang or "code"), "border"))
                 in_code, code_left = True, max_code_lines
             continue
         if in_code:
             if code_left <= 0:
                 continue
-            for chunk in wrap_display(line, width - 4, "  ", "  ", hard=True):
+            for chunk in wrap_display(line, width - 4, "│ ", "│ ", hard=True):
                 rows.append((chunk, "code"))
             code_left -= 1
             blank = False
@@ -422,6 +486,13 @@ def markdown_rows(text: str, width: int, max_code_lines: int = 80) -> list:
             for i, row in enumerate(wrap_display(clean, width - len(label) - 1,
                                                   "", "")):
                 rows.append(((f"{label} " if i == 0 else pad) + row, ""))
+            blank = False
+            continue
+        m = re.match(r"^\s*>\s?(.*)$", line)
+        if m:
+            clean = strip_inline(m.group(1)).strip()
+            for row in wrap_display(clean, width - 2, "▌ ", "  "):
+                rows.append((row, "dim"))
             blank = False
             continue
         clean = strip_inline(line).strip()

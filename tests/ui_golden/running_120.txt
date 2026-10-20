@@ -1,0 +1,31 @@
+❯ add subtract(a,b) to calc.py and test it                                               │AGENTS                        
+                                                                                         │● a0 worker                 0 
+● read_file  calc.py                                                                 0.1s│● a1 tester                 0 
+   └ 14 lines                                                                            │                              
+● edit_file  calc.py                                                          +4 -0  0.1s│FILES                         
+   └ + def subtract(a, b):                                                               │  calc.py                     
+     +     return a - b                                                                  │                              
+● bash  python -m unittest -q                                                        1.2s│RUN                           
+   └ FAIL: test_mul (test_calc.TestCalc)                                                 │r_demo_1405                   
+● bash  python -m unittest -q                                                        1.1s│4 turns · $0.0040             
+   └ Ran 3 tests                                                                         │nemotron-3-super              
+                                                                                         │                              
+→ failover glm-5.3-flash → gemma4:31b (402)                                              │                              
+  compacted 8.2k → 2.4k tokens                                                           │                              
+                                                                                         │                              
+├ a1 tester · gemma4:31b                                                       running 8s│                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+▖ Verifying…  13s · ↓ 2.1k tok                                                                               esc to stop
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ type to steer, enter to send                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ctx 31% · $0.004                                                                                       nemotron-3-super

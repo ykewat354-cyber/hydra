@@ -1,0 +1,31 @@
+❯ summarise the repo                
+                                    
+ ✗ Failed      2 turns · 9s · $0.001
+   files   not tracked              
+   why     401 invalid key — run hy…
+   run     r_demo_1405              
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+╭──────────────────────────────────╮
+│ ❯ Ask HYDRA to build, fix, debug │
+╰──────────────────────────────────╯
+ / commands · @ files · ! shell     

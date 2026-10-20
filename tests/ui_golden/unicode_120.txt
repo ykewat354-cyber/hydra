@@ -1,0 +1,31 @@
+                                                                                         │AGENTS                        
+ █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.2.4                                                        │● a0 worker                 0 
+ █▀█ ▀█▀ █ █ ██▀ █▀█  nemotron-3-super                                                   │                              
+ ▀ ▀  ▀  ▀▀  ▀ ▀ ▀ ▀  free plan · key ✓ loaded                                           │RUN                           
+                                                                                         │r_demo_1405                   
+ ~/gym_website                                                                           │0 turns · $0.0000             
+                                                                                         │nemotron-3-super              
+❯ नमस्ते दुनिया 🙂 — क्या हाल है?                                                          │                              
+                                                                                         │                              
+नमस्ते! हिन्दी ठीक है। 你好世界 🙂 テスト中文字符                                          │                              
+क्षत्रिय और प्रणाम — combining marks stay attached.                                         │                              
+                                                                                         │                              
+● read_file  ~/projects/very/long/path/with/a/deep/tree/नमस्ते/script.js              0.1s│                              
+   └ 5 lines                                                                             │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ Ask HYDRA to build, fix, debug or research                                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ / commands · @ files · ! shell                                                                             ctx 31% · $0

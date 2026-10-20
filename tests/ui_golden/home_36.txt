@@ -1,0 +1,31 @@
+                                    
+▌HYDRA 1.2.4 · nemotron-3-super     
+                                    
+ ~/gym_website                      
+                                    
+ Try  fix the failing tests         
+      @file attach · !cmd shell · /h
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+╭──────────────────────────────────╮
+│ ❯ Ask HYDRA to build, fix, debug │
+╰──────────────────────────────────╯
+ / commands · @ files · ! shell     

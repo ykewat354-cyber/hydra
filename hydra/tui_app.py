@@ -38,64 +38,43 @@ from . import __version__
 from . import config as C
 from . import journal as J
 from . import ui_format as U
+from . import ui_theme as UT
 
 # ------------------------------------------------------------------ theme
 
-UNI = {
-    "prompt": "❯", "tool": "●", "ok": "✓", "bad": "✗", "spawn": "◆",
-    "dot": "●", "todo": "☐", "done": "☑", "warn": "!", "rule": "─",
-    "vbar": "│", "bullet": "•", "stream": "▍", "arrow": "↳", "run": "◈",
-}
-ASCII = {
-    "prompt": ">", "tool": "*", "ok": "+", "bad": "x", "spawn": "+",
-    "dot": "*", "todo": "[ ]", "done": "[x]", "warn": "!", "rule": "-",
-    "vbar": "|", "bullet": "-", "stream": "_", "arrow": ">", "run": "#",
-}
-SPIN_UNI = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-SPIN_ASCII = ["|", "/", "-", "\\"]
-
-LOGO = [
-    "██╗  ██╗██╗   ██╗██████╗ ██████╗  █████╗",
-    "██║  ██║╚██╗ ██╔╝██╔══██╗██╔══██╗██╔══██╗",
-    "███████║ ╚████╔╝ ██║  ██║██████╔╝███████║",
-    "██╔══██║  ╚██╔╝  ██║  ██║██╔══██╗██╔══██║",
-    "██║  ██║   ██║   ██████╔╝██║  ██║██║  ██║",
-]
-
-
 class Theme:
-    def __init__(self, color=True, ascii_only=False):
+    """Semantic token -> SGR code.  Never paints a background, never italic."""
+
+    def __init__(self, color=True, ascii_only=False, glyphs=None, depth=None,
+                 light=False):
         self.color = bool(color)
-        self.ascii = bool(ascii_only)
-        c = {
-            "brand": "\x1b[48;5;37m\x1b[38;5;232m\x1b[1m",
-            "bar": "\x1b[48;5;236m\x1b[38;5;250m",
-            "head": "\x1b[1m\x1b[38;5;81m",
-            "accent": "\x1b[38;5;81m",
-            "user": "\x1b[38;5;117m",
-            "ok": "\x1b[38;5;42m",
-            "err": "\x1b[38;5;203m",
-            "warn": "\x1b[38;5;214m",
-            "dim": "\x1b[38;5;245m",
-            "tool": "\x1b[38;5;110m",
-            "spawn": "\x1b[38;5;177m",
-            "code": "\x1b[38;5;250m",
-            "border": "\x1b[38;5;239m",
-            "status": "\x1b[38;5;245m",
-            "input": "\x1b[38;5;252m",
-            "placeholder": "\x1b[38;5;240m\x1b[3m",
-            "assistant": "\x1b[38;5;252m",
-        }
-        self.codes = c if self.color else {}
+        self.depth = depth or ("256" if self.color else "none")
+        self.light = bool(light)
+        self.tier_name = UT.resolve_tier(glyphs, ascii_only)
+        self.ascii = self.tier_name == "ascii"
+        self.glyphs = UT.tier(self.tier_name)
+        c = {name: UT.fg(name, self.depth, self.light)
+             for name in ("accent", "muted", "ok", "warn", "err", "info")}
+        c.update({
+            "brand": c["accent"], "bar": c["muted"], "head": c["accent"],
+            "user": "", "dim": c["muted"], "tool": c["accent"],
+            "spawn": c["accent"], "code": "", "border": c["muted"],
+            "status": c["muted"], "input": "", "placeholder": c["muted"],
+            "assistant": "", "added": c["ok"], "removed": c["err"],
+        })
+        self.codes = c
 
     def s(self, name: str) -> str:
         return self.codes.get(name, "")
 
     def sym(self, name: str) -> str:
-        return (ASCII if self.ascii else UNI).get(name, "?")
+        return self.glyphs.get(name, "?")
+
+    def spinner_frames(self) -> list:
+        return UT.spinner_frames(self.tier_name)
 
     def spinner(self, tick: int) -> str:
-        frames = SPIN_ASCII if self.ascii else SPIN_UNI
+        frames = self.spinner_frames()
         return frames[int(tick) % len(frames)]
 
 
@@ -171,6 +150,56 @@ def _report_status_style(status: str) -> str:
             "killed": "err", "interrupted": "warn"}.get(str(status), "warn")
 
 
+def _cost(value) -> str:
+    """Money for the new UI: ``$0``, ``<$0.001`` or three decimals."""
+    try:
+        v = float(value or 0)
+    except Exception:
+        return "$0"
+    if v <= 0:
+        return "$0"
+    if v < 0.001:
+        return "<$0.001"
+    return f"${v:.3f}"
+
+
+def _row_lr(left: str, right: str, width: int, style: str) -> tuple:
+    """One row with *right* right-aligned; drop the stat when there is no room."""
+    left = str(left or "")
+    right = str(right or "")
+    width = max(8, int(width))
+    lw, rw = U.display_width(left), U.display_width(right)
+    if right and lw + rw + 1 > width:
+        return (U.clip_display(left, width), style)
+    if not right:
+        return (U.clip_display(left, width), style)
+    return (left + " " * max(1, width - lw - rw) + right, style)
+
+
+def _diff_rows(old, new, width: int, limit: int = 4):
+    """Return ``(added, removed, rows)``: a bounded, coloured line diff."""
+    import difflib
+    old_lines = str(old or "").splitlines()
+    new_lines = str(new or "").splitlines()
+    added = removed = 0
+    rows = []
+    for line in difflib.unified_diff(old_lines, new_lines, lineterm="", n=0):
+        if line.startswith(("+++", "---", "@@")):
+            continue
+        if line.startswith("+"):
+            added += 1
+            style = "added"
+        elif line.startswith("-"):
+            removed += 1
+            style = "removed"
+        else:
+            continue
+        if len(rows) < limit and line[1:].strip():
+            rows.append(("  " + U.clip_display(line[0] + " " + line[1:],
+                                               max(4, width - 2)), style))
+    return added, removed, rows
+
+
 def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> list:
     """Render one transcript block to a list of ``(text, style)`` rows."""
     width = max(16, int(width))
@@ -180,21 +209,35 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
 
     if k == "welcome":
         m = b.meta
-        if width >= 46 and not theme.ascii:
-            out.extend((ln, "head") for ln in LOGO)
-            out.append(("", ""))
+        version = str(m.get("version") or __version__)
+        model = str(m.get("model") or "?")
+        cwd = str(m.get("cwd") or "~")
+        logo = str(m.get("logo") or "auto")
+        out.append(("", ""))
+        show_logo = (logo == "on") or (logo == "auto" and width >= 44
+                                       and not theme.ascii)
+        if show_logo:
+            right = [f"HYDRA {version}", model,
+                     f"{m.get('plan', 'free')} plan {sym('sep')} key {m.get('key', '?')}"]
+            for i in range(3):
+                line = " " + UT.LOGO[i] + "  " + right[i]
+                out.append((U.clip_display(line, width),
+                            "head" if i == 0 else
+                            ("accent" if i == 1 else "dim")))
         else:
-            out.append(("HYDRA", "head"))
-        out.append(("autonomous multi-agent · Termux · Ollama Cloud · zero gates",
-                    "dim"))
+            mark = "▌" if not theme.ascii else "|"
+            out.append((U.end_ellipsis(
+                f" {mark}HYDRA {version} {sym('sep')} {model}",
+                width), "head"))
         out.append(("", ""))
-        out.append((f"  cwd    {m.get('cwd', '')}", "dim"))
-        out.append((f"  model  {m.get('model', '?')}  → fallback", "dim"))
-        out.append((f"  key    {m.get('key', '?')}  ·  {m.get('plan', 'free')} plan",
-                    "dim"))
-        out.append(("", ""))
-        out.append(("Type a task below.  /help for commands.", "accent"))
-        out.append(("", ""))
+        out.append((" " + U.clip_display(cwd, max(4, width - 1)), "dim"))
+        if m.get("tips", True):
+            out.append(("", ""))
+            out.append((U.clip_display(" Try  fix the failing tests", width),
+                        "dim"))
+            out.append((U.clip_display(
+                f"      @file attach {sym('sep')} !cmd shell {sym('sep')} /help",
+                width), "dim"))
         return out
 
     if k in ("user", "steer"):
@@ -202,7 +245,6 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
         style = "user" if k == "user" else "dim"
         for row in U.wrap_display(b.text, width, prefix, "  "):
             out.append((row, style))
-        out.append(("", ""))
         return out
 
     if k == "assistant":
@@ -211,8 +253,10 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
             out.append(("", ""))
             return out
         rows = U.markdown_rows(b.text, width)
+        styles = {"head": "head", "code": "code", "border": "border",
+                  "dim": "dim"}
         for row, style in rows:
-            out.append((row, style or "assistant"))
+            out.append((row, styles.get(style or "", "assistant")))
         if not b.final:
             for i in range(len(out) - 1, -1, -1):
                 text, style = out[i]
@@ -222,7 +266,6 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
                     break
         if not out:
             out.append((sym("stream") + " …", "dim"))
-        out.append(("", ""))
         return out
 
     if k == "tool":
@@ -231,45 +274,96 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
         tag = "" if b.agent in ("", "a0") else f"[{b.agent}] "
         head = f"{sym('tool')} {tag}{name}"
         summary = str(m.get("summary") or "")
-        room = max(8, width - U.display_width(head) - 2)
-        if summary:
-            head += "  " + U.clip_display(summary, room)
-        out.append((head, "tool"))
+        ms = m.get("ms")
+        elapsed = ""
+        if ms is not None:
+            try:
+                elapsed = U.fmt_elapsed(int(ms) / 1000.0)
+            except Exception:
+                elapsed = ""
         ok = m.get("ok")
+        head_style = "tool" if ok is None else ("ok" if ok else "err")
+        args = m.get("args") if isinstance(m.get("args"), dict) else {}
+        added = removed = 0
+        stat = ""
+        if (name in ("edit_file", "apply_patch") and ok
+                and (args.get("old") is not None
+                     or args.get("new") is not None)):
+            added, removed, _unused = _diff_rows(args.get("old"),
+                                                 args.get("new"), width, limit=0)
+            stat = f"+{added} -{removed}"
+        right = f"{stat}  {elapsed}" if stat else elapsed
+        room = max(6, width - U.display_width(head) - U.display_width(right) - 2)
+        if summary:
+            if name in ("read_file", "write_file", "edit_file", "apply_patch",
+                        "create_file", "ls", "view_image", "repo_map"):
+                head += "  " + U.middle_ellipsis(summary, room)
+            else:
+                head += "  " + U.end_ellipsis(summary, room)
+        out.append(_row_lr(head, right, width, head_style))
         if ok is not None:
-            rstyle = "ok" if ok else "err"
-            rsym = sym("ok") if ok else sym("bad")
             brief = str(m.get("brief") or "")
-            out.append((f"  {rsym} {brief}", rstyle))
+            conn = "   " + sym("conn") + " "
+            if (name in ("edit_file", "apply_patch") and (added or removed)):
+                _a, _r, diff = _diff_rows(args.get("old"), args.get("new"),
+                                          width, limit=4)
+                for i, (row, rstyle) in enumerate(diff):
+                    body = row[2:] if row.startswith("  ") else row
+                    out.append((conn + body if i == 0 else "     " + body,
+                                rstyle))
+            elif name == "write_file" and ok and args.get("content") is not None:
+                content = str(args.get("content") or "")
+                n = content.count("\n") + (1 if content
+                                           and not content.endswith("\n") else 0)
+                out.append((conn + f"+{n} lines", "dim"))
+            elif name in ("bash", "python") and not ok:
+                out.append((conn + brief, "err"))
+                prev = str(m.get("preview") or "")
+                tail = [ln.strip() for ln in prev.splitlines() if ln.strip()][-3:]
+                for ln in tail:
+                    out.append(("     " + U.clip_display(ln, max(4, width - 5)),
+                                "removed"))
+            else:
+                out.append((conn + brief, "dim" if ok else "err"))
         if verbose:
-            args = m.get("args")
-            if isinstance(args, (dict, list)):
+            args_v = m.get("args")
+            if isinstance(args_v, (dict, list)):
                 try:
-                    args = json.dumps(args, ensure_ascii=False)
+                    args_v = json.dumps(args_v, ensure_ascii=False)
                 except Exception:
-                    args = str(args)
-            if args:
+                    args_v = str(args_v)
+            if args_v:
                 out.extend((row, "dim") for row in
-                           U.wrap_display(str(args), width, "  args: ", "        ")[:6])
+                           U.wrap_display(str(args_v), width, "  args: ",
+                                          "        ")[:6])
             prev = m.get("preview")
             if prev:
                 out.extend((row, "code") for row in
-                           U.wrap_display(str(prev), width, "  out:  ", "        ")[:10])
+                           U.wrap_display(str(prev), width, "  out:  ",
+                                          "        ")[:10])
         return out
 
     if k == "spawn":
         m = b.meta
         aid = b.agent or m.get("id") or "?"
         role = m.get("role") or "worker"
-        task = U.short(m.get("task") or "", 100)
         model = m.get("model") or ""
-        head = f"{sym('spawn')} {aid} {role}"
+        state = str(m.get("state") or "running")
+        head = f"{sym('tree_tee')} {aid} {role}"
         if model:
-            head += f" · {model}"
-        out.append((U.clip_display(head, width), "spawn"))
-        if task:
-            for row in U.wrap_display(task, width, "  ", "  "):
-                out.append((row, "dim"))
+            head += f" {sym('sep')} {model}"
+        right = str(m.get("elapsed_text") or "")
+        if not right and state == "running" and m.get("ts"):
+            try:
+                right = U.fmt_elapsed(time.time() - float(m["ts"]))
+            except Exception:
+                right = ""
+        if right:
+            right = f"{state} {right}"
+        elif state != "running":
+            right = state
+        out.append(_row_lr(head, right, width,
+                           "spawn" if state == "running" else "dim"))
         return out
 
     if k == "subreport":
@@ -278,24 +372,23 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
         role = m.get("role") or "worker"
         status = str(m.get("status") or "done")
         st = _report_status_style(status)
-        out.append((f"{sym('spawn')} {aid} {role} · {status}", st))
+        out.append((U.clip_display(
+            f"{sym('tree_tee')} {aid} {role} {sym('sep')} {status}", width), st))
         summary = str(m.get("summary") or "")
-        rows = U.wrap_display(summary, width, "  ", "  ")
-        for row in rows[:8]:
+        for row in U.wrap_display(summary, width, "  ", "  ")[:4]:
             out.append((row, "dim"))
-        if len(rows) > 8:
-            out.append((f"  … {len(rows) - 8} more lines (hydra tree {aid})", "dim"))
-        out.append(("", ""))
         return out
 
     if k in ("notice", "warn", "error"):
-        prefix = {"notice": "· ", "warn": sym("warn") + " ",
-                  "error": sym("bad") + " "}[k]
         style = {"notice": "dim", "warn": "warn", "error": "err"}[k]
-        for row in U.wrap_display(b.text, width, prefix, "  "):
+        text = str(b.text or "")
+        arrows = re.compile(r"^(failover|retry|resumed|waiting|parked|stall)")
+        if k == "notice":
+            prefix = (sym("arrow") + " ") if arrows.match(text) else "  "
+        else:
+            prefix = (sym("warn") + " ") if k == "warn" else (sym("bad") + " ")
+        for row in U.wrap_display(text, width, prefix, "  "):
             out.append((row, style))
-        if k != "notice":
-            out.append(("", ""))
         return out
 
     if k == "verify":
@@ -303,48 +396,92 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
         verdict = str(m.get("verdict") or "pass")
         model = m.get("model") or "?"
         if verdict == "pass":
-            out.append((f"{sym('ok')} verifier pass · {model}", "ok"))
+            out.append((f"{sym('ok')} verify pass {sym('sep')} {model}", "ok"))
         elif verdict == "skipped":
-            out.append((f"· verifier skipped · {m.get('error') or ''}", "dim"))
+            out.append((f"{sym('sep')} verify skipped {sym('sep')} "
+                        f"{m.get('error') or ''}", "dim"))
         else:
-            out.append((f"{sym('bad')} verifier fail · {model}", "err"))
-            issues = m.get("issues") or []
-            shown = 0
-            for it in issues:
-                for row in U.wrap_display(U.issue_text(it), width, "  • ", "    "):
-                    out.append((row, "warn"))
-                shown += 1
-                if shown >= 5:
-                    break
-            if len(issues) > shown:
-                out.append((f"  … {len(issues) - shown} more issue(s)", "dim"))
-        out.append(("", ""))
+            out.append((f"{sym('bad')} verify fail", "err"))
+            reason = str(m.get("reason") or "")
+            if reason:
+                out.append((f"   {'verify':<8}"
+                            + U.end_ellipsis(reason, max(4, width - 11)),
+                            "warn"))
         return out
 
     if k == "report":
         m = b.meta
         status = str(m.get("status") or "done")
         st = _report_status_style(status)
-        rule = sym("rule") * min(width, 72)
-        out.append((rule, "border"))
-        bits = [f"{sym('ok') if status == 'done' else sym('warn')} {status.upper()}"]
-        if m.get("run"):
-            bits.append(str(m["run"]))
+        icon = {"done": sym("ok"), "partial": sym("tool"),
+                "failed": sym("bad")}.get(status, sym("tool"))
+        title = {"done": "Done", "partial": "Partial",
+                 "failed": "Failed"}.get(status, status.title())
+        bits = []
         if m.get("turns") is not None:
             bits.append(f"{m['turns']} turns")
-        if m.get("agents"):
-            bits.append(f"{m['agents']} agents")
-        if m.get("cost") is not None:
-            bits.append(U.fmt_money(m["cost"]))
         if m.get("duration") is not None:
-            bits.append(U.fmt_duration(m["duration"]))
-        for row in U.wrap_display(" · ".join(bits), width, "", "  "):
-            out.append((row, st))
+            bits.append(U.fmt_elapsed(m["duration"]))
+        if m.get("cost") is not None:
+            bits.append(_cost(m["cost"]))
+        out.append(_row_lr(f" {icon} {title}",
+                           f" {sym('sep')} ".join(bits), width, st))
+        stats = m.get("file_stats") if isinstance(m.get("file_stats"), dict) else {}
+        files = m.get("files")
+        if files is None:
+            out.append(("   files   not tracked", "dim"))
+        else:
+            pieces = []
+            for x in files:
+                name = str(x).strip()
+                if not name:
+                    continue
+                a, r = stats.get(name, (0, 0))
+                if a or r:
+                    name += f" +{a}" + (f" -{r}" if r else "")
+                pieces.append(name)
+            if pieces:
+                text = "  ".join(pieces)
+                room = max(10, width - 11)
+                if U.display_width(text) > room:
+                    text = U.clip_display(text, max(1, room - 1)) + "…"
+                out.append(("   files   " + text, "dim"))
+            else:
+                out.append(("   files   none", "dim"))
+        verify = m.get("verify") or {}
+        if verify.get("verdict") == "pass":
+            detail = str(verify.get("detail") or "").strip()
+            out.append(("   verify  pass" + (f" {sym('sep')} {detail}"
+                                        if detail else ""),
+                        "ok"))
+        elif verify.get("verdict") == "fail":
+            reason = str(verify.get("reason") or "verifier rejected the finish")
+            out.append(("   verify  " + sym("bad") + " "
+                        + U.end_ellipsis(reason, max(8, width - 14)), "warn"))
+        elif verify.get("verdict") == "skipped":
+            out.append(("   verify  skipped", "dim"))
+        url = str(m.get("open_url") or "")
+        if url and status == "done":
+            out.append(("   open    "
+                        + U.end_ellipsis(url, max(8, width - 19)) + " (/open)",
+                        "info"))
+        if status == "partial":
+            out.append((f"   next    /resume to continue {sym('sep')} /why",
+                        "dim"))
+        if status == "failed":
+            why = str(m.get("why") or m.get("summary") or "").strip()
+            if why:
+                out.append(("   why     "
+                            + U.end_ellipsis(why, max(8, width - 11)), "err"))
+        if m.get("run"):
+            out.append((f"   run     {m['run']}", "dim"))
         summary = str(m.get("summary") or "").strip()
-        if summary:
+        if summary and status != "failed":
             out.append(("", ""))
             for row, rstyle in U.markdown_rows(summary, width):
-                out.append((row, rstyle or "assistant"))
+                out.append((row, {"head": "head", "code": "code",
+                                  "border": "border", "dim": "dim"}.get(
+                                      rstyle or "", "assistant")))
         findings = m.get("findings") or []
         if findings:
             out.append(("", ""))
@@ -352,21 +489,21 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
             shown = 0
             for f in findings:
                 for row in U.wrap_display(U.issue_text(f), width, "  • ", "    "):
-                    out.append((row, ""))
+                    out.append((row, "assistant"))
                 shown += 1
                 if shown >= 12:
                     break
             if len(findings) > shown:
                 out.append((f"  … {len(findings) - shown} more", "dim"))
-        files = [str(x) for x in (m.get("files") or []) if str(x).strip()]
-        if files:
-            out.append(("", ""))
-            for row in U.wrap_display(", ".join(files), width, "files     ", "          "):
-                out.append((row, "dim"))
         arts = [str(x) for x in (m.get("artifacts") or []) if str(x).strip()]
         if arts:
-            for row in U.wrap_display(", ".join(arts), width, "artifacts ", "          "):
-                out.append((row, "accent"))
+            text = "  ".join(arts[:4])
+            room = max(10, width - 14)
+            if U.display_width(text) > room:
+                text = U.clip_display(text, max(1, room - 1)) + "…"
+            out.append(("   artifacts " + text, "accent"))
+            if len(arts) > 4:
+                out.append((f"             +{len(arts) - 4} more", "dim"))
         issues = [str(x) for x in (m.get("open_issues") or []) if str(x).strip()]
         if issues:
             out.append(("", ""))
@@ -376,36 +513,51 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
                     out.append((row, "warn"))
             if len(issues) > 8:
                 out.append((f"  … {len(issues) - 8} more", "dim"))
-        if m.get("saved"):
-            out.append(("", ""))
-            out.append((f"saved · {m['saved']}  ·  hydra tail {m.get('run', '')}",
-                        "dim"))
-        out.append((rule, "border"))
-        out.append(("", ""))
         return out
 
     if k == "done":
         m = b.meta
-        bits = [f"{sym('ok')} {m.get('status', 'done')}"]
+        status = str(m.get("status") or "done")
+        st = _report_status_style(status)
+        icon = {"done": sym("ok"), "partial": sym("tool"),
+                "failed": sym("bad")}.get(status, sym("tool"))
+        title = {"done": "Done", "partial": "Partial",
+                 "failed": "Failed"}.get(status, status.title())
+        bits = []
         if m.get("turns") is not None:
             bits.append(f"{m['turns']} turns")
-        if m.get("agents"):
-            bits.append(f"{m['agents']} agents")
-        bits.append(f"{U.fmt_tokens(m.get('tin', 0))}↑ {U.fmt_tokens(m.get('tout', 0))}↓")
-        if m.get("cost") is not None:
-            bits.append(U.fmt_money(m["cost"]))
         if m.get("duration") is not None:
-            bits.append(U.fmt_duration(m["duration"]))
-        out.append((" · ".join(bits), "ok" if m.get("status") == "done" else "warn"))
+            bits.append(U.fmt_elapsed(m["duration"]))
+        if m.get("cost") is not None:
+            bits.append(_cost(m["cost"]))
+        out.append(_row_lr(f" {icon} {title}",
+                           f" {sym('sep')} ".join(bits), width, st))
+        if status == "failed":
+            why = str(m.get("why") or "").strip()
+            if why:
+                out.append(("   why     "
+                            + U.end_ellipsis(why, max(8, width - 11)), "err"))
         if m.get("saved"):
-            out.append((f"saved · {m['saved']}", "dim"))
-        out.append(("", ""))
+            out.append((f"   run     {m['run'] or m['saved']}", "dim"))
         return out
 
     if k == "plan":
         out.append(("plan", "head"))
-        for row in U.wrap_display(b.text, width, "", ""):
-            out.append((row, "dim"))
+        for line in str(b.text or "").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            low = s.lower()
+            if low[:3] in ("[ ]", "[x]", "[~]"):
+                mark = s[:3]
+                rest = s[3:].strip()
+                style = "dim" if low.startswith("[x]") else (
+                    "accent" if low.startswith("[~]") else "assistant")
+                out.append((f" {mark} "
+                            + U.end_ellipsis(rest, max(4, width - 5)), style))
+            else:
+                for row in U.wrap_display(s, width, "  ", "  "):
+                    out.append((row, "dim"))
         out.append(("", ""))
         return out
 
@@ -423,13 +575,20 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
 
 COMMANDS = [
     ("/help", "commands and keys"),
+    ("/new", "fresh screen and session"),
     ("/clear", "clear the screen"),
+    ("/compact", "compact the context now"),
     ("/copy", "copy the last answer / report"),
+    ("/open", "open the last served URL"),
+    ("/expand", "expand a tool card: /expand N"),
+    ("/collapse", "collapse expanded tool output"),
+    ("/why", "why the last run finished that way"),
     ("/plan", "ask the lead for a plan"),
     ("/pause", "pause between turns"),
     ("/unpause", "continue a paused run"),
     ("/resume", "resume an interrupted run"),
     ("/tree", "agent tree and status"),
+    ("/agents", "alias for /tree"),
     ("/kill", "kill a sub-agent: /kill a2"),
     ("/model", "pin a model: /model [role=]name"),
     ("/models", "role chains"),
@@ -439,11 +598,15 @@ COMMANDS = [
     ("/runs", "recent runs"),
     ("/doctor", "environment check"),
     ("/init", "explore this repo into HYDRA.md"),
+    ("/ui", "show or set the UI mode"),
+    ("/glyphs", "which symbols this font can draw"),
     ("/keys", "key bindings"),
     ("/quit", "leave the TUI"),
     ("/verbose", "show full tool output"),
+    ("/export", "write the transcript to a file"),
 ]
-_ARG_COMMANDS = {"/kill", "/model", "/note", "/undo", "/resume"}
+_ARG_COMMANDS = {"/kill", "/model", "/note", "/undo", "/resume",
+                 "/expand", "/collapse", "/export", "/ui"}
 
 HELP_TEXT = """\
 Type a task and press Enter. The agent starts immediately; there are no approval
@@ -524,10 +687,21 @@ class App:
         self.host = str(C.get(cfg, "api.host", "") or "")
         self.work_ctx = int(C.get(cfg, "loop.working_ctx", 48000) or 48000)
 
-        color = (os.environ.get("NO_COLOR") is None
-                 and os.environ.get("TERM", "") != "dumb")
-        self.theme = Theme(color=color,
-                           ascii_only=os.environ.get("HYDRA_ASCII") == "1")
+        self.ui_mode = str(C.get(cfg, "ui.mode", "fullscreen") or "fullscreen")
+        if os.environ.get("HYDRA_UI"):
+            self.ui_mode = os.environ["HYDRA_UI"]
+        self.show_thinking = bool(C.get(cfg, "ui.show_thinking", False))
+        self.animations = bool(C.get(cfg, "ui.animations", True))
+        self.mouse_opt = bool(C.get(cfg, "ui.mouse", False))
+        self._logo_opt = str(C.get(cfg, "ui.logo", "auto") or "auto")
+        glyphs = str(C.get(cfg, "ui.glyphs", "auto") or "auto")
+        if os.environ.get("HYDRA_ASCII") == "1":
+            glyphs = "ascii"
+        theme_opt = str(C.get(cfg, "ui.theme", "auto") or "auto").lower()
+        depth = UT.color_depth()
+        self.theme = Theme(color=depth != "none", ascii_only=glyphs == "ascii",
+                           glyphs=glyphs, depth=depth,
+                           light=theme_opt == "light")
 
         self.width, self.height = self._term_size()
         self.blocks: list = []
@@ -567,6 +741,12 @@ class App:
         self.agent_count = 0
         self.last_report = None
         self.last_assistant = ""
+        self.last_prompt_tokens = 0
+        self.last_verify = None
+        self.last_url = ""
+        self.steer_queued = 0
+        self.paste_chip = None
+        self._welcome_idx = None
         self._report_seen = False
         self._reported_agents: set = set()
         self._stream_block = None
@@ -634,7 +814,9 @@ class App:
     def add_welcome(self):
         self.blocks.append(Block("welcome", meta={
             "cwd": self._cwd_short(), "model": self.model,
-            "key": self._key_label(), "plan": self.plan}))
+            "key": self._key_label(), "plan": self.plan,
+            "version": __version__, "tips": True, "logo": self._logo_opt}))
+        self._welcome_idx = len(self.blocks) - 1
         self._bump()
 
     def add_notice(self, text: str, kind: str = "notice"):
@@ -654,8 +836,21 @@ class App:
 
     def add_user(self, text: str, steer: bool = False):
         self.blocks.append(Block("steer" if steer else "user", text=str(text)))
+        if steer:
+            self.steer_queued += 1
+        else:
+            self.paste_chip = None
+            self._hide_tips()
         self.scroll = 0
         self._bump()
+
+    def _hide_tips(self):
+        idx = self._welcome_idx
+        if idx is not None and 0 <= idx < len(self.blocks):
+            try:
+                self.blocks[idx].meta["tips"] = False
+            except Exception:
+                pass
 
     def _ensure_agent(self, aid: str, **kw) -> AgentInfo:
         aid = str(aid or "a0")
@@ -754,7 +949,8 @@ class App:
             # run blocks are rendered as a compact notice
             self.blocks[-1].kind = "notice"
             self.blocks[-1].text = (
-                f"{self.theme.sym('run')} {self.run_id} · {cwd} · {self.model}")
+                f"{self.theme.sym('run')} {self.run_id} {self.theme.sym('sep')} "
+                f"{cwd} {self.theme.sym('sep')} {self.model}")
             self._flush_pending()
             self._bump()
             return
@@ -778,14 +974,17 @@ class App:
                                status="running")
             self.blocks.append(Block("spawn", agent=aid, meta={
                 "id": aid, "role": ev.get("role") or "worker",
-                "task": ev.get("task") or "", "model": ev.get("model") or ""}))
+                "task": ev.get("task") or "", "model": ev.get("model") or "",
+                "state": "running",
+                "ts": float(ev.get("ts") or time.time())}))
             self._bump()
             return
 
         if t == "agent_end":
             a = self._ensure_agent(aid, status=ev.get("status") or "done")
             if aid not in self._reported_agents and aid != "a0":
-                self.add_notice(f"{aid} {a.role} ended · {a.status}")
+                self.add_notice(f"{aid} {a.role} ended "
+                            f"{self.theme.sym('sep')} {a.status}")
             self._bump()
             return
 
@@ -810,6 +1009,7 @@ class App:
                 self.current_model = model
             tin = int(ev.get("in_tokens") or 0)
             tout = int(ev.get("out_tokens") or 0)
+            self.last_prompt_tokens = tin or self.last_prompt_tokens
             a.tin += tin
             a.tout += tout
             a.turns += 1
@@ -864,7 +1064,7 @@ class App:
             self.current_tool = name
             self._ensure_agent(aid)
             b = Block("tool", agent=aid, meta={
-                "name": name, "args": args,
+                "name": name, "args": args, "idx": len(self.blocks),
                 "summary": U.tool_summary(name, args), "ok": None})
             self.blocks.append(b)
             if name == "todo" and isinstance(args.get("items"), list):
@@ -891,6 +1091,9 @@ class App:
             prev = str(ev.get("preview") or "")
             ok, brief = U.result_brief(name, prev, chars=chars, ms=ms,
                                        lines=lines, width=max(20, self.width - 14))
+            # the card shows the elapsed time right-aligned; drop the copy that
+            # result_brief appends for the plain renderer
+            brief = re.sub(r"\s*·\s*\d+(?:\.\d+)?s\s*$", "", str(brief or "")).strip()
             if target is None:
                 target = Block("tool", agent=aid, meta={
                     "name": name, "args": {}, "summary": "",
@@ -902,6 +1105,10 @@ class App:
             target.meta["chars"] = chars
             target.meta["ms"] = ms
             target.meta["lines"] = lines
+            m = re.search(r"https?://(?:127\.0\.0\.1|localhost):\d{2,5}[^\s\"'<>]*",
+                          prev)
+            if m:
+                self.last_url = m.group(0).rstrip(".,);")
             pending = any(b.kind == "tool" and b.agent == aid
                           and b.meta.get("ok") is None for b in self.blocks)
             if not pending:
@@ -919,9 +1126,20 @@ class App:
 
         if t == "verify":
             verdict = str(ev.get("verdict") or "pass")
+            issues = ev.get("issues") or []
+            reason = str(ev.get("reason") or "")
+            if not reason and issues:
+                try:
+                    reason = U.issue_text(issues[0])
+                except Exception:
+                    reason = str(issues[0])
+            self.last_verify = {"verdict": verdict,
+                                "model": str(ev.get("model") or ""),
+                                "reason": reason, "issues": issues}
             self.blocks.append(Block("verify", agent=aid, meta={
                 "verdict": verdict, "model": ev.get("model") or "",
-                "issues": ev.get("issues") or [], "error": ev.get("error") or ""}))
+                "issues": issues, "error": ev.get("error") or "",
+                "reason": reason}))
             if verdict == "fail":
                 self.phase = "thinking"
             self._bump()
@@ -953,12 +1171,14 @@ class App:
             return
 
         if t == "compact":
-            self.add_notice(f"context compacted · {ev.get('retired') or 0} messages retired")
+            self.add_notice(f"context compacted {self.theme.sym('sep')} "
+                            f"{ev.get('retired') or 0} messages retired")
             return
 
         if t == "sigint":
             self.phase = "canceling"
-            self.add_notice("cancelled the in-flight work · the run continues", "warn")
+            self.add_notice("cancelled the in-flight work "
+                            f"{self.theme.sym('sep')} the run continues", "warn")
             return
 
         if t in ("snapshot", "hook", "parsed_from_text", "swarm_reattach",
@@ -972,6 +1192,33 @@ class App:
 
         if self.verbose:
             self.add_notice(f"event {t} {U.short(ev, 120)}")
+
+    def _file_stats(self) -> dict:
+        """Per-file ``(added, removed)`` from the tool cards of this run."""
+        stats: dict = {}
+        for b in self.blocks:
+            if b.kind != "tool":
+                continue
+            m = b.meta
+            if m.get("ok") is False:
+                continue
+            args = m.get("args") if isinstance(m.get("args"), dict) else {}
+            path = args.get("path") or args.get("file")
+            if not path:
+                continue
+            a, r = stats.get(str(path), (0, 0))
+            if m.get("name") == "write_file" and args.get("content") is not None:
+                content = str(args.get("content") or "")
+                n = content.count("\n") + (1 if content
+                                           and not content.endswith("\n") else 0)
+                stats[str(path)] = (a + n, r)
+            elif (m.get("name") in ("edit_file", "apply_patch")
+                    and (args.get("old") is not None
+                         or args.get("new") is not None)):
+                added, removed, _ = _diff_rows(args.get("old"), args.get("new"),
+                                               80, limit=0)
+                stats[str(path)] = (a + added, r + removed)
+        return stats
 
     def _on_report(self, aid: str, rep: dict):
         status = str(rep.get("status") or "done")
@@ -987,9 +1234,15 @@ class App:
             meta = {
                 "status": status, "summary": summary,
                 "findings": rep.get("findings") or [],
-                "files": rep.get("files_changed") or [],
+                "files": rep.get("files_changed"),   # None = not tracked
                 "artifacts": rep.get("artifacts") or [],
                 "issues": rep.get("open_issues") or [],
+                "open_issues": rep.get("open_issues") or [],
+                "verify": dict(self.last_verify or {}),
+                "open_url": self.last_url or "",
+                "file_stats": self._file_stats(),
+                "why": (str(rep.get("summary") or "").strip()
+                        if status == "failed" else ""),
                 "run": self.run_id, "turns": self.turns,
                 "agents": self.agent_count, "cost": self.cost,
                 "duration": (time.time() - self.run_started
@@ -1082,16 +1335,22 @@ class App:
                 "tout": self.tokens_out, "cost": self.cost,
                 "duration": (self.done_at - self.run_started
                              if self.run_started else None),
+                "why": str(report.get("summary") or info.get("error") or ""),
                 "saved": str(C.run_dir(self.run_id)) if self.run_id else "",
             }))
         if info.get("code") not in (0, None) and status == "failed" and not report:
             self.add_notice("run failed — see the log above", "error")
         self.pending_steers.clear()
+        self.steer_queued = 0
+        self.current_tool = None
         self._stream_block = None
         self._stream_agent = None
-        self.flash(f"{status} · {U.fmt_duration(self.done_at - (self.run_started or self.done_at))}"
-                   + (" · End = latest" if self.scroll else ""),
-                   2.0)
+        sep = self.theme.sym("sep")
+        self.flash(
+            f"{status} {sep} "
+            f"{U.fmt_duration(self.done_at - (self.run_started or self.done_at))}"
+            + (f" {sep} End = latest" if self.scroll else ""),
+            2.0)
         self._bump()
 
     # -------------------------------------------------- render
@@ -1100,8 +1359,18 @@ class App:
         if key == self._cache_key:
             return self._cache_lines
         lines = []
+        last_kind = None
         for b in self.blocks:
-            lines.extend(render_block(b, width, self.theme, self.verbose))
+            rows = render_block(b, width, self.theme, self.verbose)
+            if not rows:
+                continue
+            quiet = (b.kind in ("tool",) and last_kind == "tool") or \
+                    (b.kind in ("notice", "warn", "error")
+                     and last_kind in ("notice", "warn", "error"))
+            if lines and not quiet:
+                lines.append(("", ""))
+            lines.extend(rows)
+            last_kind = b.kind
         total = len(lines)
         if self.scroll > 0 and total != self._last_total:
             # keep the reader's place: new output shifts the window, it never
@@ -1150,7 +1419,8 @@ class App:
         rows.append(("RUN", "dim"))
         if self.run_id:
             rows.append((U.clip_display(str(self.run_id), width), "dim"))
-            rows.append((f"{self.turns} turns · {U.fmt_money(self.cost)}", "dim"))
+            rows.append((f"{self.turns} turns {self.theme.sym('sep')} "
+                         f"{U.fmt_money(self.cost)}", "dim"))
             if self.current_model:
                 rows.append((U.short(self.current_model, width), "dim"))
         else:
@@ -1161,89 +1431,129 @@ class App:
         return rows
 
     def _header(self, width: int) -> list:
-        dot = self.theme.sym("dot")
-        if self.running:
-            state, dstyle = "running", "warn"
-        elif self.phase in ("failed", "error"):
-            state, dstyle = "error", "err"
-        elif self.run_id:
-            state, dstyle = "ready", "ok"
-        else:
-            state, dstyle = "ready", "ok"
-        left = [(" HYDRA ", "brand"), (" " + __version__, "bar")]
-        right = []
+        left = [(" HYDRA ", "brand"), (__version__, "muted")]
+        right_bits = []
         if self.run_id:
-            right.append((f"{self.run_id} ", "bar"))
-        right.append((self._cwd_short(), "bar"))
-        if width >= 72:
-            right.append((f" · {U.short(self.current_model, 24)}", "bar"))
-            right.append((f" · {U.fmt_money(self.cost)} ", "bar"))
-        right.append((" ", "bar"))
-        right.append((dot, dstyle))
-        right.append((" " + state + " ", "bar"))
-        return _aligned(width, left, right, "bar")
+            right_bits.append(str(self.run_id))
+        right_bits.append(self._cwd_short())
+        if width >= 72 and self.current_model:
+            right_bits.append(U.short(self.current_model, 20))
+        right_text = f" {self.theme.sym('sep')} ".join(right_bits)
+        lw = sum(U.display_width(t) for t, _ in left)
+        rw = U.display_width(right_text)
+        if lw + rw + 3 > width:
+            right_text = U.middle_ellipsis(right_text, max(4, width - lw - 3))
+            rw = U.display_width(right_text)
+        gap = max(1, width - lw - rw - 1)
+        return left + [(" " * gap, ""), (right_text + " ", "muted")]
+
+    def _verb(self) -> str:
+        phase = self.phase
+        if phase == "thinking":
+            return "Responding" if self._stream_block is not None else "Thinking"
+        if phase == "tool" and self.current_tool:
+            verb = {"read_file": "Reading", "ls": "Listing", "glob": "Searching",
+                    "grep": "Searching", "edit_file": "Editing",
+                    "write_file": "Writing", "bash": "Running",
+                    "python": "Running", "web_search": "Searching the web",
+                    "web_fetch": "Fetching", "http": "Fetching",
+                    "finish": "Finishing"}.get(self.current_tool)
+            return verb or f"Running {self.current_tool}"
+        if phase == "checking":
+            return "Verifying"
+        if phase == "canceling":
+            return "Stopping"
+        if phase == "starting":
+            return "Starting"
+        if phase == "parked":
+            return "Parked"
+        return "Working"
+
+    def _palette_active(self) -> bool:
+        return (self.input.startswith("/") and " " not in self.input
+                and bool(self._ac_matches()))
+
+    def _palette_rows(self, width: int) -> list:
+        if not self._palette_active():
+            return []
+        matches = self._ac_matches()
+        descs = {c: d for c, d in COMMANDS}
+        rows = []
+        for i, c in enumerate(matches[:6]):
+            desc = U.end_ellipsis(descs.get(c, ""), max(8, width - 14))
+            selected = i == (self.ac_index % len(matches))
+            marker = self.theme.sym("prompt") if selected else " "
+            style = "accent" if selected else "muted"
+            rows.append([(f" {marker} {c:<10.10} {desc}", style)])
+        return rows
 
     def _status(self, width: int) -> list:
         now = time.monotonic()
+        sep = self.theme.sym("sep")
         if self._flash_text and now < self._flash_until:
-            text, style = self._flash_text, "accent"
+            left = [(self._flash_text, "accent")]
+            right_text = ""
+        elif self.running:
+            spin = self.theme.spinner(int(now * 8) if self.animations else 0)
+            elapsed = (U.fmt_elapsed(time.time() - self.run_started)
+                       if self.run_started else "")
+            left = [(f"{spin} {self._verb()}…", "accent")]
+            if elapsed:
+                left.append((f"  {elapsed}", "muted"))
+            if self.tokens_out or self.tokens_in:
+                left.append((f" {sep} ↓ {U.fmt_tokens(self.tokens_out)} tok",
+                         "muted"))
+            if self.scroll:
+                left.append((f" {sep} ↑{self.scroll} more", "muted"))
+            right_text = "esc to stop"
+        elif self.scroll:
+            left = [(f"↑{self.scroll} more", "muted"),
+                    (f" {sep} End = live", "accent")]
+            right_text = ""
         else:
-            matches = self._ac_matches()
-            if matches and self.input.startswith("/"):
-                shown = "  ".join(matches[:max(1, width // 11)])
-                text, style = shown, "dim"
-            elif self.running:
-                spin = self.theme.spinner(int(now * 12))
-                phase = self.phase
-                if self.phase == "thinking":
-                    phase = "thinking"
-                elif self.phase == "tool" and self.current_tool:
-                    phase = f"running {self.current_tool}"
-                elif self.phase == "checking":
-                    phase = "checking the finish"
-                elif self.phase == "canceling":
-                    phase = "cancelling"
-                elif self.phase == "starting":
-                    phase = "starting"
-                bits = [f"{spin} {phase}"]
-                if self.scroll:
-                    bits.append(f"↑{self.scroll}" +
-                                (" End=live" if width >= 58 else ""))
-                if self.current_model:
-                    bits.append(self.current_model)
-                if width >= 58:
-                    bits.append(f"{U.fmt_tokens(self.tokens_in)}↑ "
-                                f"{U.fmt_tokens(self.tokens_out)}↓")
-                    bits.append(U.fmt_money(self.cost))
-                    if self.run_started:
-                        bits.append(U.fmt_duration(time.time() - self.run_started))
-                if self.agent_count > 1:
-                    bits.append(f"{self.agent_count} agents")
-                bits.append("ctrl-c cancel" if width >= 52 else "^C cancel")
-                text, style = " · ".join(bits), "status"
-            else:
-                if self.run_id:
-                    status = (self.last_report or {}).get("status") or "ready"
-                    bits = [f"{self.theme.sym('dot')} {status}"]
-                    if self.scroll:
-                        bits.append(f"↑{self.scroll}" +
-                                    (" End=live" if width >= 58 else ""))
-                    if self.turns:
-                        bits.append(f"{self.turns} turns")
-                    if self.cost:
-                        bits.append(U.fmt_money(self.cost))
-                    bits.append("enter: new task · /help" if width >= 58 else "/help")
-                    text, style = " · ".join(bits), "ok" if status == "done" else "status"
-                else:
-                    text = ("● ready · enter a task · /help · ctrl-d quit"
-                            if width >= 58 else "● ready · /help · ^D quit")
-                    style = "status"
-        return [(U.clip_display(text, width), style)]
+            return []
+        lw = sum(U.display_width(t) for t, _ in left)
+        rw = U.display_width(right_text)
+        if right_text and lw + rw + 2 <= width:
+            gap = max(1, width - lw - rw)
+            return [left + [(" " * gap, ""), (right_text, "muted")]]
+        if lw > width:
+            left = [(U.clip_display("".join(t for t, _ in left), width), left[0][1])]
+        return [left]
 
-    def _input_layout(self, width: int, max_rows: int):
+    def _footer(self, width: int) -> list:
+        sep = self.theme.sym("sep")
+        ctx = 0
+        if self.work_ctx > 0:
+            ctx = min(100, int(round(100.0 * self.last_prompt_tokens
+                                     / self.work_ctx)))
+        cost = (self.cost if (self.running or self.run_id)
+                else (self.session_cost or self.cost))
+        if self._palette_active():
+            left_text = f"↑↓ select {sep} tab complete"
+            right_text = f"ctx {ctx}% {sep} {_cost(cost)}"
+        elif self.running:
+            left_text = f"ctx {ctx}% {sep} {_cost(cost)}"
+            right_text = (U.short(self.current_model, max(8, width // 3))
+                          if self.current_model else "")
+        else:
+            left_text = f"/ commands {sep} @ files {sep} ! shell"
+            right_text = f"ctx {ctx}% {sep} {_cost(cost)}"
+        if self.steer_queued:
+            left_text = f"{self.steer_queued} queued {sep} " + left_text
+        lw, rw = U.display_width(left_text), U.display_width(right_text)
+        if lw + rw + 2 > width:
+            return [(" " + U.clip_display(left_text, max(4, width - 1)),
+                     "muted")]
+        return [(" " + left_text, "muted"), (" " * (width - lw - rw - 1), ""),
+                (right_text, "muted")]
+
+    def _input_box(self, width: int, max_rows: int):
+        prompt = self.theme.sym("prompt") + " "
+        vbar = self.theme.sym("box_v")
+        avail = max(1, width - 5)
         text = self.input
         cursor = max(0, min(len(text), int(self.cursor)))
-        avail = max(1, width - 2)
         rows = [""]
         positions = {}
         row = col = 0
@@ -1266,10 +1576,37 @@ class App:
         cr, cc = positions.get(cursor, positions[len(text)])
         max_rows = max(1, int(max_rows))
         offset = max(0, cr - max_rows + 1)
-        visible = rows[offset:offset + max_rows]
-        if not visible:
-            visible = [""]
-        return visible, cr - offset, cc + 2, offset
+        visible = rows[offset:offset + max_rows] or [""]
+        placeholder = ""
+        if not text:
+            if self.paste_chip:
+                placeholder = self.paste_chip
+            else:
+                placeholder = ("type to steer, enter to send" if self.running
+                               else "Ask HYDRA to build, fix, debug or research")
+        box = [[(U.clip_display(self.theme.sym("box_tl")
+                                + self.theme.sym("box_h") * max(1, width - 2)
+                                + self.theme.sym("box_tr"), width), "border")]]
+        prefix_w = U.display_width(prompt)
+        for i, line in enumerate(visible):
+            actual = offset + i
+            if not text and i == 0:
+                body = U.clip_display(placeholder, avail)
+                spans = [(vbar + " ", "border"), (prompt, "accent"),
+                         (body, "placeholder")]
+                content_w = prefix_w + U.display_width(body)
+            else:
+                pre = prompt if actual == 0 else "  "
+                body = U.clip_display(line, avail)
+                spans = [(vbar + " ", "border"), (pre, "accent"), (body, "input")]
+                content_w = U.display_width(pre) + U.display_width(body)
+            pad = max(0, width - 3 - content_w)
+            spans.append((" " * pad + vbar, "border"))
+            box.append(spans)
+        box.append([(U.clip_display(self.theme.sym("box_bl")
+                                    + self.theme.sym("box_h") * max(1, width - 2)
+                                    + self.theme.sym("box_br"), width), "border")])
+        return box, 1 + (cr - offset), 2 + prefix_w + cc
 
     def render(self, width: int = None, height: int = None) -> list:
         """Return plain text rows (tests / fallback). Cursor via ``cursor_pos``."""
@@ -1283,19 +1620,17 @@ class App:
     def _compose(self, width: int, height: int):
         width = max(30, int(width))
         height = max(6, int(height))
-        input_max = min(4, max(1, height // 5))
-        visible, cr, cc, off = self._input_layout(width, input_max)
-        input_rows = len(visible)
-        status_row = height - input_rows - 1
-        if status_row < 2:
-            status_row = 0
-        transcript_top = 1
-        transcript_height = max(0, (status_row - 1) if status_row else
-                                 (height - input_rows - 1))
+        palette = self._palette_rows(width)
+        input_max = min(6, max(1, height // 5))
+        box, cur_row, cur_col = self._input_box(width, input_max)
+        status_lines = self._status(width)
+        footer = self._footer(width)
+        chrome = len(palette) + len(status_lines) + len(box) + 1
+        transcript_height = max(0, height - chrome)
         side_w = 0
         main_w = width
-        if width >= 96:
-            side_w = 30
+        if width >= 96 and self.ui_mode != "inline":
+            side_w = min(30, max(20, width // 4))
             main_w = width - side_w - 1
         lines = self._transcript_lines(main_w)
         total = len(lines)
@@ -1311,53 +1646,29 @@ class App:
         sidebar = self._sidebar(side_w) if side_w else []
 
         rows: list = []
-        rows.append(self._header(width))
-        # transcript
         for i in range(transcript_height):
-            if i < len(view):
-                text, style = view[i]
-            else:
-                text, style = "", ""
+            text, style = view[i] if i < len(view) else ("", "")
             spans = [(U.pad_display(text, main_w), style)]
             if side_w:
-                if i < len(sidebar):
-                    stext, sstyle = sidebar[i]
-                else:
-                    stext, sstyle = "", ""
-                spans += [("│", "border"),
+                stext, sstyle = sidebar[i] if i < len(sidebar) else ("", "")
+                spans += [(self.theme.sym("box_v"), "border"),
                           (U.pad_display(stext, side_w), sstyle)]
             rows.append(_pad_spans(spans, width))
-        # status
-        if status_row:
-            rows.append(_pad_spans(self._status(width), width))
-        # input
-        prompt = self.theme.sym("prompt") + " "
-        placeholder = ""
-        if not self.input:
-            placeholder = ("Steer the agent…" if self.running else
-                           "Ask HYDRA to build, fix, debug, or research…")
-        for i, text in enumerate(visible):
-            actual = off + i
-            pre = prompt if actual == 0 else "  "
-            if not self.input and i == 0:
-                spans = [(pre, "accent"), (U.clip_display(placeholder,
-                                                          width - 2), "placeholder")]
-            else:
-                spans = [(pre, "accent"), (text, "input")]
-            rows.append(_pad_spans(spans, width))
-        # trim / pad to height
+        for sp in palette:
+            rows.append(_pad_spans(sp, width))
+        for sp in status_lines:
+            rows.append(_pad_spans(sp, width))
+        input_top = len(rows)
+        for sp in box:
+            rows.append(_pad_spans(sp, width))
+        rows.append(_pad_spans(footer, width))
         while len(rows) < height:
             rows.append([("", "")])
         rows = rows[:height]
         self._last_transcript_height = transcript_height
-        # cursor
         cursor = None
-        if status_row:
-            input_start = status_row + 1
-        else:
-            input_start = height - input_rows
-        cand_r = input_start + cr
-        cand_c = cc
+        cand_r = input_top + cur_row
+        cand_c = cur_col
         if 0 <= cand_r < height and 0 <= cand_c <= width:
             cursor = (cand_r, min(cand_c, width - 1))
         return rows, cursor
@@ -2319,9 +2630,16 @@ class App:
             except Exception:
                 pass
         tty.setraw(0)
-        self._write("\x1b[?1049h\x1b[?25l\x1b[?2004h"
-                    "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h"
-                    "\x1b[2J\x1b[H")
+        # v1.2.4: do NOT capture the mouse by default.  `?1007h` is
+        # alternate-scroll: a swipe arrives as arrow keys, while Termux keeps
+        # native swipe-scroll and long-press selection (WO2 D8 / §5.2).
+        seq = ("\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1007h"
+               "\x1b[2J\x1b[H")
+        if self.mouse_opt:
+            seq = ("\x1b[?1049h\x1b[?25l\x1b[?2004h"
+                   "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h"
+                   "\x1b[2J\x1b[H")
+        self._write(seq)
 
     def _restore_terminal(self):
         try:

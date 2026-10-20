@@ -1,0 +1,31 @@
+                                                      
+ █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.2.4                     
+ █▀█ ▀█▀ █ █ ██▀ █▀█  nemotron-3-super                
+ ▀ ▀  ▀  ▀▀  ▀ ▀ ▀ ▀  free plan · key ✓ loaded        
+                                                      
+ ~/gym_website                                        
+                                                      
+ Try  fix the failing tests                           
+      @file attach · !cmd shell · /help               
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+                                                      
+ ❯ /model     pin a model: /model [role=]name         
+   /models    role chains                             
+╭────────────────────────────────────────────────────╮
+│ ❯ /m                                               │
+╰────────────────────────────────────────────────────╯
+ ↑↓ select · tab complete             ctx 31% · $0.004

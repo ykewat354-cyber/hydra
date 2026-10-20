@@ -1,0 +1,31 @@
+                                                                                         │AGENTS                        
+ █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.2.4                                                        │  (none yet)                  
+ █▀█ ▀█▀ █ █ ██▀ █▀█  nemotron-3-super                                                   │                              
+ ▀ ▀  ▀  ▀▀  ▀ ▀ ▀ ▀  free plan · key ✓ loaded                                           │RUN                           
+                                                                                         │r_demo_1405                   
+ ~/gym_website                                                                           │0 turns · $0.0040             
+                                                                                         │nemotron-3-super              
+ Try  fix the failing tests                                                              │                              
+      @file attach · !cmd shell · /help                                                  │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+                                                                                         │                              
+ ❯ /model     pin a model: /model [role=]name                                                                           
+   /models    role chains                                                                                               
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ ❯ /m                                                                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ ↑↓ select · tab complete                                                                               ctx 31% · $0.004

@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.2.3).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 264 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.2.3 adds partial/cap file reporting (including shell writes), a turn-cap finish nudge, Hinglish "fir/phir" handling, and a stricter website-3D skill. v1.2.2 added workspace/recent-run context, the built-in skill, truthful `files_changed`, and duplicate-tree/open-todo verifier checks.
+> **Status: implemented (v1.2.4).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 283 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.2.4 is the UI v2 makeover (Work Order #2, M1): compact lockup, semantic colours, glyph tiers, honest closing cards, real cursor, no mouse capture, `hydra ui-demo`. v1.2.3 added partial/cap file reporting (including shell writes), a turn-cap finish nudge, Hinglish "fir/phir" handling, and a stricter website-3D skill.
 
 ### Install (one line)
 
@@ -21,6 +21,9 @@ curl -fsSL https://raw.githubusercontent.com/ykewat354-cyber/hydra/main/install-
 That clones/updates `~/hydra`, installs `$PREFIX/bin/hydra`, and runs `hydra doctor`.
 Then: `hydra models probe` → `hydra` (opens the TUI) or `hydra "your task"`.
 
+**v1.2.4 (UI v2, M1):** compact 3-row lockup, semantic colours/glyph tiers,
+live status line, tool cards with diffs, honest closing cards, real cursor at
+the caret, mouse capture off by default, `hydra ui-demo`.
 **v1.2.3 (coding root fix 2):** partial/cap reports list shell-written files,
 a turn-cap finish nudge, Hinglish "fir/phir" handling, and a stricter
 `website-3d` skill (real wing geometry, one background server).

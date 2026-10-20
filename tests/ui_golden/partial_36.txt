@@ -1,0 +1,31 @@
+❯ build the 3d butterfly site       
+                                    
+● edit_file  js/script.js           
+   └ + const b = 2;                 
+     + const c = 3;                 
+                                    
+! turn cap reached (30) — finishing 
+  as partial                        
+                                    
+ ● Partial                          
+   files   js/script.js +2          
+   verify  ✗ no HTTP 200 evidence … 
+   next    /resume to continue · /wh
+   run     r_demo_1405              
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+                                    
+╭──────────────────────────────────╮
+│ ❯ Ask HYDRA to build, fix, debug │
+╰──────────────────────────────────╯
+ / commands · @ files · ! shell     
