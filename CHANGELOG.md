@@ -50,7 +50,7 @@ actually served, and what the verifier cost.
 
 ### Verified
 
-- 402 tests + 176 subtests pass; `hydra eval seed` 10/10; 40 UI goldens
+- 404 tests + 176 subtests pass; `hydra eval seed` 10/10; 40 UI goldens
   regenerated for the cost/footer changes.
 - Real smoke (`hello.txt`): 3 turns, 1 agent, verifier `gpt-oss:20b`, 0
   verifier tool calls, `files_changed=["hello.txt"]` (`mixed`, scan complete),

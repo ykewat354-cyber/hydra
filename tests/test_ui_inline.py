@@ -25,6 +25,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from tests import vt as vtmod                  # noqa: E402
+from tests.fake_ollama import FakeOllama      # noqa: E402
 from hydra import config as C                 # noqa: E402
 from hydra import tui_inline as TI            # noqa: E402
 from hydra.tui_app import App                 # noqa: E402
@@ -357,6 +358,108 @@ class InlinePtyTests(unittest.TestCase):
 
     def test_sighup_restores_the_terminal(self):
         self._signal_restore(signal.SIGHUP)
+
+
+class RunningPtyTests(unittest.TestCase):
+    """E1: a chunked run keeps a typeable composer, status and footer."""
+
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory()
+        self.cwd = tempfile.TemporaryDirectory()
+        self.addCleanup(self.home.cleanup)
+        self.addCleanup(self.cwd.cleanup)
+        self.fake = FakeOllama(tags=["fake"]).start()
+        self.addCleanup(self.fake.stop)
+        Path(self.home.name, "key").write_text("fake-key", encoding="utf-8")
+        self.env = _env(self.home.name)
+
+    def _start(self):
+        master, slave = pty.openpty()
+        _set_size(master, 31, 54)
+        roles = ("lead", "worker", "researcher", "coder", "reviewer",
+                 "summarizer", "critic", "planner", "vision", "debugger",
+                 "tester", "scribe")
+        cmd = HYDRA_CMD + [
+            "-i", "--set", f"api.host={self.fake.url}",
+            "--set", "loop.verify=never", "--set", "loop.max_turns=6",
+            "--set", "termux.wake_lock=false",
+            "--set", "termux.notify_on_finish=false",
+            "--set", "termux.notify_on_park=false",
+            "--set", "ui.mode=inline",
+        ]
+        for role in roles:
+            cmd += ["--set", f'roles.{role}.chain=["fake"]']
+        try:
+            proc = subprocess.Popen(cmd, cwd=self.cwd.name, env=self.env,
+                                    stdin=slave, stdout=slave, stderr=slave)
+        finally:
+            os.close(slave)
+        buf = _read_until(master, lambda b: "╭".encode() in b, timeout=25)
+        buf += _read_for(master, 0.4)
+        return proc, master, buf
+
+    def _node(self, tail=1.0):
+        return {"content": "working on the task " * 20, "chunks": 20,
+                "delay_chunks": 0.08, "tail_delay": tail,
+                "tool_calls": [{"function": {"name": "finish", "arguments": {
+                    "status": "done", "summary": "done",
+                    "files_changed": []}}}]}
+
+    def _quit(self, proc, master, buf):
+        buf += _wait_exit(master, proc)
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        return buf
+
+    def test_three_chunked_runs_accept_steering_and_show_footer(self):
+        proc, master, buf = self._start()
+        self.fake.add("fake", *[self._node() for _ in range(3)])
+        for i in range(3):
+            os.write(master, f"run number {i}\r".encode())
+            seen = _read_until(master, lambda b: b"esc to stop" in b,
+                               timeout=10)
+            self.assertTrue(seen, buf[-1500:])
+            buf += seen
+            os.write(master, b"steer this run")
+            during = _read_for(master, 0.6)
+            buf += during
+            self.assertIn(b"steer this run", during)
+            self.assertIn(b"esc to stop", seen)
+            self.assertIn(b"$0", seen + during)
+            os.write(master, b"\r")   # submit the steer, clear the composer
+            done = _read_until(master, lambda b: b"Ask HYDRA" in b,
+                               timeout=15)
+            self.assertTrue(done, buf[-1500:])
+            buf += done
+        os.write(master, b"/quit\r")
+        buf = self._quit(proc, master, buf)
+        self.assertEqual(0, proc.returncode, buf[-1200:])
+        self.assertNotIn(b"Traceback", buf)
+
+    def test_ctrl_c_twice_stops_without_traceback(self):
+        proc, master, buf = self._start()
+        self.fake.add("fake", self._node(tail=4.0))
+        os.write(master, b"start a slow run\r")
+        seen = _read_until(master, lambda b: b"esc to stop" in b, timeout=10)
+        self.assertTrue(seen, buf[-1500:])
+        buf += seen
+        t0 = time.time()
+        os.write(master, b"\x03")
+        time.sleep(0.2)
+        os.write(master, b"\x03")
+        after = _read_until(master, lambda b: b"cancelled" in b.lower(),
+                            timeout=1.5)
+        self.assertLess(time.time() - t0, 2.0, buf[-1500:])
+        self.assertTrue(after, buf[-1500:])
+        buf += after
+        idle = _read_until(master, lambda b: b"Ask HYDRA" in b, timeout=10)
+        buf += idle
+        os.write(master, b"/quit\r")
+        buf = self._quit(proc, master, buf)
+        self.assertNotIn(b"Traceback", buf)
+        self.assertIn(b"\x1b[?25h", buf)
 
 
 if __name__ == "__main__":
