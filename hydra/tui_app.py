@@ -3182,7 +3182,25 @@ class App:
         if not (os.isatty(0) and os.isatty(1)):
             return self._run_non_tty()
         self._install_terminal()
+        read_fd = write_fd = None
+        prev_wake = None
         try:
+            # self-pipe: SIGWINCH/SIGTERM/SIGINT must wake an idle select even
+            # though it blocks with no timeout (§5.8: no idle wakeups).
+            try:
+                read_fd, write_fd = os.pipe()
+                os.set_blocking(read_fd, False)
+                os.set_blocking(write_fd, False)
+                prev_wake = signal.set_wakeup_fd(write_fd)
+            except Exception:
+                for fd in (read_fd, write_fd):
+                    if fd is not None:
+                        try:
+                            os.close(fd)
+                        except Exception:
+                            pass
+                read_fd = write_fd = None
+            fds = [0] if read_fd is None else [0, read_fd]
             self.draw()
             if self.initial:
                 task, self.initial = self.initial, ""
@@ -3205,14 +3223,25 @@ class App:
                         self._write("\x1b[2J")
                         self.draw()
                 if self.running:
-                    timeout = 0.08
+                    timeout = 0.1          # WO2 §5.8: animations <= 10 fps
+                elif self._flash_until > time.monotonic():
+                    timeout = 0.1
+                elif read_fd is not None:
+                    timeout = None         # idle: block until input or a signal
                 else:
                     timeout = 0.15
                 data = b""
                 ready = []
+                stdin_ready = False
                 try:
-                    ready, _, _ = select.select([0], [], [], timeout)
-                    if ready:
+                    ready, _, _ = select.select(fds, [], [], timeout)
+                    if read_fd is not None and read_fd in ready:
+                        try:
+                            os.read(read_fd, 4096)
+                        except OSError:
+                            pass
+                    if 0 in ready:
+                        stdin_ready = True
                         data = os.read(0, 4096)
                 except InterruptedError:
                     data = b""
@@ -3220,7 +3249,7 @@ class App:
                     data = b""
                 if data:
                     self.feed_bytes(data)
-                elif data == b"" and ready:
+                elif stdin_ready:
                     # stdin closed
                     self.quit = True
                     break
@@ -3229,7 +3258,7 @@ class App:
                     self._flash_until = 0.0
                     self._force = True
                 if self.running:
-                    if now - self._last_draw >= 0.09:
+                    if now - self._last_draw >= 0.1:
                         self.draw()
                 elif self._force or (self._flash_until > now
                                      and now - self._last_draw >= 0.1):
@@ -3249,6 +3278,17 @@ class App:
                     self.rt.close()
             except Exception:
                 pass
+            if write_fd is not None:
+                try:
+                    signal.set_wakeup_fd(prev_wake if prev_wake is not None else -1)
+                except Exception:
+                    pass
+            for fd in (read_fd, write_fd):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
             self._restore_terminal()
             self._print_exit()
 

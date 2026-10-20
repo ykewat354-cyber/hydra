@@ -305,6 +305,29 @@ class InlinePtyTests(unittest.TestCase):
         buf = self._finish(proc, master, buf)
         self.assertEqual(0, proc.returncode, buf[-800:])
 
+    def test_multi_step_resize_54_36_80(self):
+        """T-UI3: two resizes in a row; the idle loop must wake on SIGWINCH.
+
+        The loop blocks in select with no timeout when idle (§5.8), so a
+        repaint here also proves the signal self-pipe works."""
+        proc, master, buf = self._start(rows=31, cols=54)
+        for rows, cols in ((20, 36), (40, 80)):
+            _set_size(master, rows, cols)
+            os.kill(proc.pid, signal.SIGWINCH)
+            post = _read_for(master, 1.5)
+            self.assertTrue(post, f"no repaint after SIGWINCH {cols}x{rows}")
+            vt = vtmod.VT(cols, rows)
+            vt.feed(post)
+            self.assertEqual(1, vt.count_screen("╭"),
+                             f"{cols}x{rows}: box top")
+            self.assertEqual(1, vt.count_screen("╰"),
+                             f"{cols}x{rows}: box bottom")
+            self.assertNotIn(b"\x1b[?1049h", post)
+        os.write(master, b"/quit\r")
+        buf = self._finish(proc, master, buf)
+        self.assertEqual(0, proc.returncode, buf[-800:])
+        self.assertIn(b"\x1b[?25h", buf)
+
     def test_transcript_row_prints_once(self):
         proc, master, buf = self._start()
         os.write(master, b"hello there\r")
