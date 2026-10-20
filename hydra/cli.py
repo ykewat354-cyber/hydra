@@ -28,9 +28,10 @@ from . import config as C
 from . import journal as J
 from .client import CallCancelled
 
-COMMANDS = {"run", "resume", "ls", "tail", "tree", "usage", "doctor", "kill",
-            "models", "undo", "init", "map", "eval", "daemon", "schedule",
-            "report", "update", "help", "version", "ui-demo", "footprint"}
+COMMANDS = {"run", "resume", "ls", "sessions", "tail", "tree", "usage",
+            "doctor", "kill", "models", "undo", "init", "map", "eval",
+            "daemon", "boot", "schedule", "report", "update", "help",
+            "version", "ui-demo", "footprint"}
 
 HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud).
 
@@ -47,8 +48,12 @@ The TUI: assistant text streams live, tool calls collapse to one line
 commands. Ctrl-C cancels the in-flight call; press twice to stop the run.
 
 commands:
-  resume [RUN|NAME]     continue a killed / parked / interrupted run
-  ls                    list runs
+  resume [RUN|NAME]     continue an interrupted run; no arg = newest one,
+                        explicit RUN/NAME can also continue a finished one
+  sessions [--full]     named sessions with status, last activity and cwd
+  ls                    compact run list
+  boot [status|install|uninstall|tick|stop]
+                        auto-resume killed runs after Termux restarts
   tail [RUN] [-a AGENT]  recent events of a run
   tree [RUN]            agent tree with status and tokens
   report [RUN|--last]   paste-friendly run summary (--json --full --since 2h --timeline)
@@ -57,7 +62,8 @@ commands:
   models probe|ls|pin   discover models your key can use
   models bench          benchmark models on B1/B2/B3 -> ~/.hydra/scorecard.json
   models tune [--apply] propose role chains from the scorecard
-  daemon [--once]       run *.md task files dropped in ~/.hydra/queue/
+  daemon [--once] [--resume]
+                        queue runner; --resume also auto-continues killed runs
   schedule add|ls|rm    periodic jobs fired by the daemon
   map [PATH] [BUDGET]   repo map: tree + top-level symbols (cached)
   undo [RUN] [--to N]   restore the workdir from a shadow snapshot
@@ -261,6 +267,11 @@ def main(argv=None) -> int:
         return cmd_doctor(cfg, rest[1:])
     if cmd == "ls":
         return cmd_ls()
+    if cmd == "sessions":
+        return cmd_sessions(rest[1:])
+    if cmd == "boot":
+        from . import boot as B
+        return B.cli(cfg, rest[1:])
     if cmd == "usage":
         return cmd_usage(cfg, rest[1:])
     if cmd == "tail":
@@ -418,22 +429,21 @@ def cmd_run(cfg, task, o) -> int:
     code, report = 1, {}
     try:
         code, report = rt.run(task, name=o.name, lead_model=o.lead)
-    except CallCancelled:
-        # pressed outside the agent loop: there is nothing left to keep alive
-        rt.run_meta.update({"status": "interrupted", "exit_code": 130})
-        try:
-            rt.journal.checkpoint(rt.run_meta)
-        except Exception:
-            pass
-        code, report = 130, {"status": "interrupted",
-                             "summary": "cancelled by user (Ctrl-C)"}
-    except KeyboardInterrupt:
-        rt.run_meta.update({"status": "interrupted", "exit_code": 130})
-        try:
-            rt.journal.checkpoint(rt.run_meta)
-        except Exception:
-            pass
-        print("\ninterrupted — checkpoint saved; `hydra resume` continues")
+    except (CallCancelled, KeyboardInterrupt):
+        # Ctrl-C outside the agent loop: keep whatever was checkpointed and
+        # record that this was a deliberate stop, not an orphan to auto-resume.
+        meta = getattr(rt, "run_meta", None)
+        if isinstance(meta, dict):
+            meta.setdefault("stop_reason", "user")
+            meta.update({"status": "interrupted", "exit_code": 130})
+            try:
+                rt.journal.checkpoint(meta)
+            except Exception:
+                pass
+        if not isinstance(meta, dict) or not meta.get("run"):
+            print("\ninterrupted before the run started")
+        else:
+            print("\ninterrupted — checkpoint saved; `hydra resume` continues")
         code, report = 130, {"status": "interrupted",
                              "summary": "cancelled by user (Ctrl-C)"}
     finally:
@@ -451,9 +461,18 @@ def _install_signals(rt):
     prev = {}
     state = {"last": 0.0}
 
+    def mark_stop(reason: str) -> None:
+        try:
+            rt.run_meta["stop_reason"] = reason
+        except Exception:
+            pass
+
     def first_or_exit(signum, frame):
         now = time.monotonic()
         if now - state["last"] <= 2.0:
+            # The first press only cancels the in-flight call; a second press
+            # is a deliberate stop and must not be auto-resumed.
+            mark_stop("user")
             raise KeyboardInterrupt
         state["last"] = now
         rt.sigint.set()
@@ -462,10 +481,12 @@ def _install_signals(rt):
         raise CallCancelled("Ctrl-C")
 
     def on_term(signum, frame):
+        mark_stop("signal")
         rt.sigint.set()  # let in-flight tools kill their process groups
         raise KeyboardInterrupt
 
     def on_hup(signum, frame):
+        mark_stop("signal")
         try:
             rt.journal.checkpoint(rt.run_meta)
         except Exception:
@@ -690,16 +711,44 @@ def _spawn_detached(cfg, task, o) -> int:
 
 
 def cmd_resume(cfg, args, o) -> int:
+    if args and str(args[0]).lower() in ("--list", "list", "ls"):
+        return cmd_sessions(["--full"])
     if not _key_preflight(cfg):
         return 2
+    from . import sessions as S
     from .runtime import Runtime
-    which = args[0] if args else None
+    which = str(args[0]).strip() if args else None
+    if which:
+        rid = S.resolve_run(which)
+        if not rid:
+            print(f"hydra: run not found: {which}")
+            print("       hydra sessions   # named ids and titles")
+            return 2
+    elif getattr(o, "continue_", False):
+        rid = J.last_run_in(os.getcwd()) or S.pick_resume(cwd=os.getcwd())
+        if not rid:
+            print("hydra: no run in this directory to continue")
+            return 2
+    else:
+        rid = S.pick_resume(cwd=os.getcwd())
+        if not rid:
+            print("hydra: no interrupted or parked run to resume.")
+            print("       finished sessions can be continued by naming them:")
+            cmd_sessions(["--limit", "8"])
+            return 2
+    row = S.record(rid)
+    if row:
+        print(f"resuming {rid} · {row['title']}")
+        if row.get("cost"):
+            print(f"  spent: ${row['cost']:.3f} (already in this run's ledger)")
+        if row.get("activity"):
+            print(f"  last: {row['activity']}")
     rt = Runtime(cfg, quiet=o.quiet, json_out=o.json_out,
                  verbose=getattr(o, "verbose", False))
     rt.wake_lock()
     code, report = 1, {}
     try:
-        code, report = rt.resume_run(which)
+        code, report = rt.resume_run(rid)
     finally:
         rt.wake_unlock()
         _footer(rt, report, code)
@@ -991,14 +1040,113 @@ def _daemon_result(task, src, code, report, rid, usage) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _auto_resume_network(cfg, timeout: float = 4.0) -> bool:
+    """True when the API host accepts a TCP connection.
+
+    Termux:Boot can fire before Wi-Fi/DNS is ready.  Without this guard a boot
+    resume would consume its retry budget on connection-refused errors and mark
+    a perfectly good run ``failed`` before the user even opens Termux.
+    """
+    host = str(C.get(cfg, "api.host", "https://ollama.com") or "")
+    if "://" not in host:
+        host = "https://" + host
+    try:
+        from urllib.parse import urlsplit
+        u = urlsplit(host)
+        if not u.hostname:
+            return True
+        port = u.port or (443 if u.scheme == "https" else 80)
+        with socket.create_connection((u.hostname, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _auto_resume_once(cfg) -> bool:
+    """Resume the newest process-killed run, if any. Returns True if it ran."""
+    from . import sessions as S
+    from .runtime import Runtime
+    try:
+        max_attempts = int(C.get(cfg, "resume.max_attempts", 3) or 3)
+        grace = float(C.get(cfg, "resume.grace_secs", 5) or 0)
+        max_age = float(C.get(cfg, "resume.max_age_hours", 24) or 0)
+        max_usd = float(C.get(cfg, "resume.max_run_usd", 0.08) or 0)
+    except (TypeError, ValueError):
+        max_attempts, grace, max_age, max_usd = 3, 5.0, 24.0, 0.08
+    rid = S.pick_auto_resume(max_attempts=max_attempts, grace_secs=grace,
+                             max_age_hours=max_age, max_run_usd=max_usd)
+    if not rid:
+        return False
+    if not _auto_resume_network(cfg):
+        return False
+    data = J.load_run(rid) or {}
+    title = S.title(data)
+    print(f"[daemon] auto-resume {rid}: {_shorten(title, 60)}")
+    rt = None
+    try:
+        rt = Runtime(cfg, quiet=True)
+        # The same cap that decides eligibility also bounds this background
+        # continuation. A manual resume can pass --budget-usd to go higher.
+        if max_usd:
+            try:
+                rt.budget_usd = (min(rt.budget_usd, max_usd)
+                                 if rt.budget_usd > 0 else max_usd)
+            except Exception:
+                pass
+        rt.wake_lock()
+        try:
+            if C.get(cfg, "termux.notify_on_resume", True):
+                rt.notify("HYDRA resumed", f"{title} · {rid}")
+        except Exception:
+            pass
+        code, report = rt.resume_run(rid, auto=True)
+        status = (report or {}).get("status") or "?"
+        print(f"[daemon] auto-resume {rid} finished ({status}, exit {code})")
+    except SystemExit as exc:
+        print(f"[daemon] auto-resume skipped: {exc}")
+    except Exception as exc:
+        print(f"[daemon] auto-resume failed: {type(exc).__name__}: {exc}")
+    finally:
+        if rt is not None:
+            try:
+                rt.wake_unlock()
+                rt.close()
+            except Exception:
+                pass
+        # If Runtime claimed the run and then died before _execute could write
+        # a terminal status, do not leave a live daemon pid as "running" (that
+        # would hide the session forever). Mark it failed so the picker shows
+        # it and the next boot can offer it explicitly.
+        try:
+            current = J.load_run(rid) or {}
+            if (current.get("status") == "running"
+                    and int(current.get("pid") or 0) == os.getpid()):
+                current.update({"status": "failed", "finished": time.time(),
+                                "exit_code": 1,
+                                "note": "auto-resume aborted before the run loop"})
+                J.save_run_atomic(rid, current)
+        except Exception:
+            pass
+    return True
+
+
 def cmd_daemon(cfg, args) -> int:
-    """Watch ~/.hydra/queue/*.md: run each as a task, write the result to
-    queue/done/<name>.result.md, remove the source file. This is the
-    integration seam for any external bridge (SPEC §13)."""
+    """Watch ~/.hydra/queue/*.md and (with --resume) continue killed runs.
+
+    One daemon per HYDRA_HOME: a kernel flock makes extra boot/shell hooks
+    harmless.  The result file is the integration seam for external bridges.
+    """
     if not _key_preflight(cfg):
         return 2
+    from . import boot as B
     from .runtime import Runtime
     once = "--once" in args
+    auto_resume = "--resume" in args
+    lock = B.DaemonLock()
+    if not lock.acquire():
+        pid = B.daemon_pid()
+        print(f"hydra daemon: already running{' (pid ' + str(pid) + ')' if pid else ''}")
+        return 0
     qdir = C.home() / "queue"
     donedir = qdir / "done"
     qdir.mkdir(parents=True, exist_ok=True)
@@ -1016,10 +1164,16 @@ def cmd_daemon(cfg, args) -> int:
             signal.signal(sig, on_sig)
         except Exception:
             pass
-    print(f"hydra daemon: watching {qdir} (poll {poll}s)")
+    print(f"hydra daemon: watching {qdir} (poll {poll}s)"
+          + (" · auto-resume on" if auto_resume else ""))
     print(f"  drop a *.md task file there; results land in {donedir}/")
     try:
         while not stop.is_set():
+            if auto_resume and not stop.is_set():
+                try:
+                    _auto_resume_once(cfg)
+                except Exception as exc:
+                    print(f"[daemon] auto-resume loop error: {type(exc).__name__}: {exc}")
             for p in sorted(qdir.glob("*.md")):
                 if stop.is_set():
                     break
@@ -1098,6 +1252,7 @@ def cmd_daemon(cfg, args) -> int:
                 signal.signal(sig, handler)
             except Exception:
                 pass
+        lock.release()
     print("hydra daemon: stopped")
     return 0
 
@@ -1149,7 +1304,8 @@ def cmd_schedule(cfg, args) -> int:
 
 def _resolve_run(args):
     if args:
-        rid = J.find_run(args[0])
+        from . import sessions as S
+        rid = S.resolve_run(args[0])
         if not rid:
             print(f"hydra: run not found: {args[0]}")
         return rid
@@ -1159,16 +1315,52 @@ def _resolve_run(args):
     return (J.run_ids() or [None])[0]
 
 
+def _age_text(seconds: float) -> str:
+    from . import sessions as S
+    return S.age_text(seconds)
+
+
 def cmd_ls() -> int:
-    runs = J.run_ids()
-    if not runs:
+    return cmd_sessions([])
+
+
+def cmd_sessions(args) -> int:
+    """Named sessions: what ran, where it stopped, and what can resume."""
+    from . import sessions as S
+    full = "--full" in args
+    limit = 20
+    i = 0
+    while i < len(args):
+        a = str(args[i])
+        if a == "--limit" and i + 1 < len(args):
+            try:
+                limit = max(1, int(args[i + 1]))
+            except ValueError:
+                limit = 20
+            i += 1
+        elif a.startswith("--limit="):
+            try:
+                limit = max(1, int(a.split("=", 1)[1]))
+            except ValueError:
+                limit = 20
+        i += 1
+    rows = S.session_rows(limit=limit)
+    if not rows:
         print("no runs yet — start one with:  hydra \"your task\"")
         return 0
-    for rid in runs[:30]:
-        d = J.load_run(rid) or {}
-        when = time.strftime("%m-%d %H:%M", time.localtime(d.get("started") or 0))
-        label = d.get("name") or _shorten(d.get("task"), 46)
-        print(f"{rid:<16} {str(d.get('status', '?')):<10} {when}  {label}")
+    for row in rows:
+        label = row["title"]
+        money = f"${row['cost']:.3f}" if row.get("cost") else "-"
+        line = (f"{row['run']:<16} {row['state']:<11} "
+                f"{_age_text(row['age']):>6} {money:>7}  {label}")
+        print(line)
+        if full:
+            if row.get("activity"):
+                print(f"  last    {row['activity']}")
+            if row.get("cwd"):
+                print(f"  cwd     {row['cwd']}")
+            if row["resumable"]:
+                print(f"  resume  hydra resume {row['run']}")
     return 0
 
 

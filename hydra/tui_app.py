@@ -37,6 +37,7 @@ from pathlib import Path
 from . import __version__
 from . import config as C
 from . import journal as J
+from . import sessions as S
 from . import ui_format as U
 from . import ui_theme as UT
 from . import tui_inline as TI
@@ -672,6 +673,7 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
 
 COMMANDS = [
     ("/help", "commands and keys"),
+    ("/commands", "open the grouped command menu"),
     ("/new", "fresh screen: /new <task> stops the run and starts it"),
     ("/clear", "clear the screen (idle only)"),
     ("/compact", "compact the context now"),
@@ -683,7 +685,7 @@ COMMANDS = [
     ("/plan", "ask the lead for a plan"),
     ("/pause", "pause between turns"),
     ("/unpause", "continue a paused run"),
-    ("/resume", "resume an interrupted run"),
+    ("/resume", "pick a named interrupted session"),
     ("/tree", "agent tree and status"),
     ("/agents", "alias for /tree"),
     ("/jobs", "background shell jobs"),
@@ -693,7 +695,8 @@ COMMANDS = [
     ("/cost", "tokens and cost"),
     ("/note", "write to the blackboard"),
     ("/undo", "restore a snapshot"),
-    ("/runs", "recent runs"),
+    ("/runs", "recent sessions in the transcript"),
+    ("/sessions", "named sessions and what they were doing"),
     ("/doctor", "environment check"),
     ("/init", "explore this repo into HYDRA.md"),
     ("/ui", "show or set the UI mode"),
@@ -703,8 +706,19 @@ COMMANDS = [
     ("/verbose", "show full tool output"),
     ("/export", "write the transcript to a file"),
 ]
-_ARG_COMMANDS = {"/kill", "/model", "/note", "/undo", "/resume",
+_ARG_COMMANDS = {"/new", "/kill", "/model", "/note", "/undo", "/resume",
                  "/expand", "/collapse", "/export", "/ui"}
+
+COMMAND_GROUPS = [
+    ("Start & resume", ["/new", "/resume", "/sessions", "/runs", "/init"]),
+    ("While running", ["/plan", "/pause", "/unpause", "/compact",
+                       "/tree", "/agents", "/jobs", "/kill", "/note"]),
+    ("Inspect", ["/why", "/cost", "/copy", "/open", "/export",
+                 "/expand", "/collapse", "/undo"]),
+    ("Setup", ["/model", "/models", "/doctor", "/ui", "/glyphs",
+               "/keys", "/verbose"]),
+    ("Help & exit", ["/commands", "/help", "/clear", "/quit"]),
+]
 
 HELP_TEXT = """\
 Type a task and press Enter. The agent starts immediately; there are no approval
@@ -714,6 +728,7 @@ Ctrl-C cancels the in-flight call; press it twice within 2s to stop the run.
 
 commands
   /help              this help
+  /commands          grouped menu (arrow keys, Enter; context-aware)
   /clear             clear the screen (idle; refuses while a run is active)
   /new [task]        fresh screen; with a task, stop the run and start it
   /copy              copy the last answer or report file to the clipboard
@@ -725,7 +740,7 @@ commands
   /compact           force context compaction now
   /plan              ask the lead to write a todo/DAG plan (then follow it)
   /pause /unpause    pause between turns
-  /resume [RUN]      resume an interrupted run
+  /resume [RUN]      open the named-session picker (or resume RUN directly)
   /tree /agents      agent tree with status and tokens
   /jobs              background shell jobs
   /kill aN           stop one sub-agent (subtree included)
@@ -734,7 +749,7 @@ commands
   /cost              token ledger + estimate
   /note text         write to the shared blackboard
   /undo [RUN]        restore the workdir from a shadow snapshot
-  /runs              recent runs
+  /runs /sessions    recent sessions (name, state, last activity)
   /doctor            key / host / models / tmux checks
   /init              explore this repo and write HYDRA.md
   /ui [MODE]         show or save the UI mode (inline|fullscreen|plain)
@@ -748,7 +763,8 @@ input
   paste              big pastes collapse to a [pasted N lines] chip
 
 keys
-  Enter send · Tab complete a /command or @path
+  Enter send/open · Tab complete a /command or @path
+  picker: Up/Down choose · Enter open · Esc close
   Up/Down pick from the palette, else scroll the transcript (touch sends these)
   Ctrl-P/Ctrl-N history · Shift+Up/Down history · PgUp/PgDn scroll
   End live output when scrolled · mouse wheel also scrolls
@@ -757,8 +773,9 @@ keys
 """
 
 KEYS_TEXT = """\
-Enter       send the task / steer
+Enter       send the task / steer / open the selected picker row
 Tab         complete a slash command or an @file path
+Up/Down     choose in /commands or /resume pickers
 Up / Down   pick from the palette, else scroll (touch-scroll sends these too)
 Ctrl-P/N    previous / next input history
 Shift+Up/Dn previous / next input history
@@ -838,6 +855,7 @@ class App:
         self.history: list = []
         self.hist_idx = None
         self.ac_index = 0
+        self.picker = None          # resume/command modal, see _open_*_picker
 
         self.running = False
         self.phase = "idle"
@@ -1120,7 +1138,9 @@ class App:
             self.run_id = ev.get("run") or self.run_id
             self.run_started = self.run_started or time.time()
             self.phase = "thinking"
-            self.add_notice(f"resumed {self.run_id}")
+            title = str(ev.get("name") or "").strip()
+            self.add_notice(f"resumed {self.run_id}" +
+                            (f" · {title}" if title else ""))
             return
 
         if t == "agent_start":
@@ -1725,8 +1745,183 @@ class App:
             return "Parked"
         return "Working"
 
+    # -------------------------------------------------- pickers / menus
+    def _picker_active(self) -> bool:
+        return self.picker is not None
+
+    def _open_resume_picker(self):
+        if self.running:
+            self.add_notice("a run is already active — wait or stop it first", "warn")
+            return
+        rows = S.session_rows(cwd=str(self.cwd), limit=40)
+        if not rows:
+            self.add_notice("no sessions yet — start one with a task")
+            return
+        items = []
+        for row in rows:
+            stats = [row["state"], S.age_text(row["age"])]
+            if row.get("cost"):
+                stats.append(f"${row['cost']:.3f}")
+            if row.get("cwd") and not row.get("same_cwd"):
+                stats.append(U.short_path(row["cwd"]))
+            desc = list(stats)
+            if row.get("activity"):
+                desc.append(row["activity"])
+            items.append({"kind": "run", "value": row["run"],
+                          "label": row["title"], "desc": " · ".join(desc),
+                          "stats": " · ".join(stats),
+                          "activity": row.get("activity") or "",
+                          "row": row})
+        index = next((i for i, item in enumerate(items)
+                      if item["row"].get("resumable")), 0)
+        self.picker = {"kind": "resume", "title": "Resume a session",
+                       "items": items, "index": index,
+                       "hint": "↑↓ choose · enter open · esc close"}
+        self.input = ""
+        self.cursor = 0
+        self.ac_index = 0
+        self._bump()
+
+    def _open_commands_picker(self):
+        groups = list(COMMAND_GROUPS)
+        if self.running:
+            groups.sort(key=lambda g: 0 if g[0] == "While running" else 1)
+        elif self.run_id:
+            groups.sort(key=lambda g: 0 if g[0] == "Start & resume" else 1)
+        descs = {c: d for c, d in COMMANDS}
+        items: list = []
+        for group, commands in groups:
+            items.append({"kind": "header", "label": group})
+            for cmd in commands:
+                items.append({"kind": "command", "value": cmd, "label": cmd,
+                              "desc": descs.get(cmd, "")})
+        index = next((i for i, item in enumerate(items)
+                      if item.get("kind") != "header"), 0)
+        self.picker = {"kind": "commands",
+                       "title": "Commands · running" if self.running else "Commands",
+                       "items": items, "index": index,
+                       "hint": "↑↓ choose · enter insert/run · esc close"}
+        self.input = ""
+        self.cursor = 0
+        self.ac_index = 0
+        self._bump()
+
+    def _picker_move(self, delta: int):
+        if not self.picker:
+            return
+        items = self.picker["items"]
+        if not items:
+            return
+        i = int(self.picker.get("index") or 0)
+        for _ in range(max(1, len(items))):
+            i = (i + int(delta)) % len(items)
+            if items[i].get("kind") != "header":
+                self.picker["index"] = i
+                break
+        self._force = True
+
+    def _picker_choose(self):
+        if not self.picker:
+            return
+        items = self.picker.get("items") or []
+        if not items:
+            self.picker = None
+            return
+        item = items[min(int(self.picker.get("index") or 0), len(items) - 1)]
+        if item.get("kind") == "header":
+            self._picker_move(1)
+            return
+        kind = self.picker.get("kind")
+        self.picker = None
+        self._force = True
+        if kind == "resume":
+            self.resume_run(item.get("value"))
+            return
+        cmd = str(item.get("value") or "")
+        if cmd in _ARG_COMMANDS:
+            self.input = cmd + " "
+            self.cursor = len(self.input)
+            self.flash(f"{cmd} — add an argument, then Enter", 1.8)
+            self._bump()
+        elif cmd:
+            self.handle_command(cmd)
+
+    def _picker_action(self, action: str):
+        if action in ("UP", "HISTUP", "PREV"):
+            self._picker_move(-1)
+        elif action in ("DOWN", "HISTDN", "NEXT"):
+            self._picker_move(1)
+        elif action == "ENTER":
+            self._picker_choose()
+        elif action in ("ESC", "CTRL_C"):
+            self.picker = None
+            self._force = True
+        elif action in ("PGUP", "PGDN", "HOME", "END", "TAB"):
+            self._picker_move(-1 if action in ("PGUP", "HOME") else 1)
+        self._dirty = True
+
+    def _picker_rows(self, width: int) -> list:
+        if not self.picker:
+            return []
+        items = self.picker.get("items") or []
+        idx = int(self.picker.get("index") or 0)
+        kind = str(self.picker.get("kind") or "")
+        # A phone is usually 36–54 columns. Side-by-side name/description
+        # leaves no room for state, age or the last action there, so a resume
+        # item becomes a small three-line card instead.
+        narrow = kind == "resume" and width < 62
+        if narrow:
+            visible = max(1, min(4, (int(self.height or 24) - 10) // 3))
+        else:
+            visible = max(3, min(10, int(self.height or 24) // 3))
+            if self.height <= 12:
+                visible = 3
+        start = max(0, min(idx - visible // 2, max(0, len(items) - visible)))
+        end = min(len(items), start + visible)
+        rows = []
+        title = str(self.picker.get("title") or "Select")
+        rows.append([(U.clip_display(f" {self.theme.sym('prompt')} {title}  "
+                                     f"{self.picker.get('hint') or ''}", width),
+                      "accent")])
+        for i in range(start, end):
+            item = items[i]
+            if item.get("kind") == "header":
+                rows.append([(U.clip_display(f"   {str(item.get('label')).upper()}",
+                                             width), "muted")])
+                continue
+            selected = i == idx
+            mark = self.theme.sym("prompt") if selected else " "
+            style = "accent" if selected else "muted"
+            label_text = str(item.get("label") or "")
+            if narrow:
+                label = U.end_ellipsis(label_text, max(8, width - 4))
+                rows.append([(U.clip_display(f" {mark} {label}", width), style)])
+                stats = U.end_ellipsis(str(item.get("stats") or ""),
+                                       max(8, width - 5))
+                rows.append([(U.clip_display(f"   {stats}", width), "muted")])
+                act = U.end_ellipsis(str(item.get("activity") or ""),
+                                     max(8, width - 5))
+                if act:
+                    rows.append([(U.clip_display(f"   {act}", width), "muted")])
+                continue
+            if kind == "commands":
+                label = U.end_ellipsis(label_text, 12)
+                desc = U.end_ellipsis(str(item.get("desc") or ""),
+                                      max(8, width - 19))
+                line = f" {mark} {label:<12.12} {desc}"
+            else:
+                label = U.end_ellipsis(label_text, 34)
+                desc = U.end_ellipsis(str(item.get("desc") or ""),
+                                      max(8, width - 42))
+                line = f" {mark} {label:<34.34} {desc}"
+            rows.append([(U.clip_display(line, width), style)])
+        if start > 0 or end < len(items):
+            rows.append([(U.clip_display(
+                f"   {idx + 1}/{len(items)} · more above/below", width), "muted")])
+        return rows
+
     def _palette_active(self) -> bool:
-        return bool(self._ac_matches())
+        return self.picker is None and bool(self._ac_matches())
 
     def _palette_rows(self, width: int) -> list:
         if not self._palette_active():
@@ -1801,7 +1996,11 @@ class App:
         cost = (self.cost if (self.running or self.run_id)
                 else (self.session_cost or self.cost))
         money = (_cost(cost), _cost_style(cost, cfg=self.cfg))
-        if self._palette_active():
+        if self.picker is not None:
+            left_parts = [("↑↓ choose " + sep + " enter open " + sep
+                           + " esc close", "muted")]
+            right_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]
+        elif self._palette_active():
             left_parts = [("↑↓ select " + sep + " tab complete", "muted")]
             right_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]
         elif self.running:
@@ -1825,6 +2024,8 @@ class App:
                 left_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]
                 if self.current_model:
                     right_parts = []
+            elif self.picker is not None:
+                left_parts = [("↑↓ enter esc", "muted")]
             elif self._palette_active():
                 left_parts = [("↑↓ select", "muted")]
             else:
@@ -1915,12 +2116,13 @@ class App:
     def _compose(self, width: int, height: int):
         width = max(30, int(width))
         height = max(6, int(height))
-        palette = self._palette_rows(width)
+        picker = self._picker_rows(width)
+        palette = self._palette_rows(width) if not picker else []
         input_max = min(6, max(1, height // 5))
         box, cur_row, cur_col = self._input_box(width, input_max)
         status_lines = self._status(width)
         footer = self._footer(width)
-        chrome = len(palette) + len(status_lines) + len(box) + 1
+        chrome = len(picker) + len(palette) + len(status_lines) + len(box) + 1
         transcript_height = max(0, height - chrome)
         side_w = 0
         main_w = width
@@ -1953,6 +2155,8 @@ class App:
                 spans += [(self.theme.sym("box_v"), "border"),
                           (U.pad_display(stext, side_w), sstyle)]
             rows.append(_pad_spans(spans, width))
+        for sp in picker:
+            rows.append(_pad_spans(sp, width))
         for sp in palette:
             rows.append(_pad_spans(sp, width))
         for sp in status_lines:
@@ -2013,6 +2217,8 @@ class App:
         return out
 
     def _ac_matches(self) -> list:
+        if self.picker is not None:
+            return []
         if self.input.startswith("/") and " " not in self.input:
             pre = self.input
             return [c for c, _desc in COMMANDS if c.startswith(pre)]
@@ -2185,6 +2391,10 @@ class App:
     def _insert_text(self, text: str):
         if not text:
             return
+        if self.picker is not None:
+            # Type-to-filter is deliberately omitted: on a phone, stray
+            # characters during a picker are more often accidental than useful.
+            return
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         if len(self.input) + len(text) > 300_000:
             text = text[:max(0, 300_000 - len(self.input))]
@@ -2270,6 +2480,9 @@ class App:
         self._dirty = True
 
     def handle_action(self, action: str):
+        if self.picker is not None:
+            self._picker_action(action)
+            return
         if action == "ENTER":
             self.submit_input()
         elif action == "BACKSPACE":
@@ -2378,6 +2591,8 @@ class App:
         self.submit(text)
 
     def submit(self, text: str):
+        if self.picker is not None:
+            return
         text = str(text).strip()
         if not text:
             return
@@ -2501,6 +2716,14 @@ class App:
         if self.running:
             self.add_notice("a run is already active", "warn")
             return
+        if not which:
+            which = S.pick_resume(cwd=str(self.cwd))
+            if not which:
+                self.add_notice("no interrupted or parked session to resume; "
+                                "use /runs to pick a finished one by id", "warn")
+                return
+        row = S.record(which)
+        label = f"{which} · {row['title']}" if row else str(which)
         if self.rt is not None:
             try:
                 self.rt.close()
@@ -2509,7 +2732,11 @@ class App:
             self.rt = None
         if self.blocks and self.blocks[-1].kind not in ("welcome", "rule"):
             self.blocks.append(Block("rule"))
-        self.add_notice(f"resuming {which or 'the last run in this directory'}…")
+        self.add_notice(f"resuming {label}…")
+        if row and row.get("cost"):
+            self.add_notice(f"spent so far: ${row['cost']:.3f}")
+        if row and row.get("activity"):
+            self.add_notice(f"last: {row['activity']}")
         self.running = True
         self.phase = "starting"
         self.run_started = time.time()
@@ -2546,6 +2773,16 @@ class App:
                 code = 130
                 report = {"status": "interrupted",
                           "summary": "cancelled by user (Ctrl-C)"}
+                try:
+                    meta = getattr(rt, "run_meta", None)
+                    if isinstance(meta, dict) and meta:
+                        meta.setdefault("stop_reason", "user")
+                        if meta.get("status") == "running":
+                            meta.update({"status": "interrupted",
+                                         "exit_code": 130})
+                        rt.journal.checkpoint(meta)
+                except Exception:
+                    pass
             elif name == "SystemExit":
                 code = 2
                 report = {"status": "failed", "summary": str(exc)}
@@ -2620,6 +2857,11 @@ class App:
     def request_stop(self):
         self._canceling = True
         self.phase = "canceling"
+        try:
+            if self.rt is not None:
+                self.rt.run_meta.setdefault("stop_reason", "user")
+        except Exception:
+            pass
         if self.rt is not None:
             try:
                 for a in list(self.rt.agents.values()):
@@ -2652,6 +2894,9 @@ class App:
             return
         if cmd in ("/help", "/?"):
             self.add_notice(HELP_TEXT)
+            return
+        if cmd == "/commands":
+            self._open_commands_picker()
             return
         if cmd == "/keys":
             self.add_notice(KEYS_TEXT)
@@ -2794,7 +3039,10 @@ class App:
                 self.add_notice("resumed")
             return
         if cmd == "/resume":
-            self.resume_run(arg or None)
+            if arg:
+                self.resume_run(arg)
+            else:
+                self._open_resume_picker()
             return
         if cmd == "/note":
             if not arg:
@@ -2811,8 +3059,8 @@ class App:
         if cmd == "/undo":
             self._undo(arg)
             return
-        if cmd == "/runs":
-            self._runs()
+        if cmd in ("/runs", "/sessions"):
+            self._runs(full=(cmd == "/sessions"))
             return
         if cmd == "/doctor":
             self._doctor()
@@ -3102,16 +3350,21 @@ class App:
             lines.append(("  remove  " if not dry else "  delete  ") + str(p))
         self.add_notice("\n".join(lines))
 
-    def _runs(self):
-        ids = J.run_ids()[:8]
-        if not ids:
-            self.add_notice("no runs yet")
+    def _runs(self, full: bool = False):
+        rows = S.session_rows(cwd=str(self.cwd), limit=12)
+        if not rows:
+            self.add_notice("no sessions yet")
             return
         lines = []
-        for rid in ids:
-            data = J.load_run(rid) or {}
-            task = U.short(data.get("task") or "", 60)
-            lines.append(f"{rid}  {str(data.get('status') or '?'):<10} {task}")
+        for row in rows:
+            mark = "*" if row.get("resumable") else " "
+            money = f"${row['cost']:.3f}" if row.get("cost") else "-"
+            lines.append(f"{mark}{row['run']}  {row['state']:<11} "
+                         f"{S.age_text(row['age']):>6} {money:>7}  {row['title']}")
+            if full and row.get("activity"):
+                lines.append(f"   last: {U.short(row['activity'], 100)}")
+        if any(row.get("resumable") for row in rows):
+            lines.append("resume: /resume picks a named session (or hydra resume RUN)")
         self.add_notice("\n".join(lines))
 
     def _doctor(self):
@@ -3276,6 +3529,12 @@ class App:
     def _on_signal(self, signum, frame):
         self.sig_stop = True
         self._sig = signum
+        try:
+            if self.rt is not None and self.running:
+                reason = "signal" if signum in (signal.SIGTERM, signal.SIGHUP) else "user"
+                self.rt.run_meta.setdefault("stop_reason", reason)
+        except Exception:
+            pass
 
     def _install_terminal(self):
         import termios

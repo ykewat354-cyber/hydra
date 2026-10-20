@@ -107,15 +107,32 @@ def last_run_in(cwd: str):
 
 
 def find_run(name_or_id: str):
+    """Find by exact id/name, then a unique id/name prefix.
+
+    Names are now auto-generated from the task, so ``hydra resume "OTT site"``
+    and the TUI picker can use the friendly title instead of the timestamp id.
+    """
     if not name_or_id:
         return None
-    if (C.run_dir(name_or_id) / "run.json").is_file():
-        return name_or_id
-    for rid in run_ids():
+    value = str(name_or_id).strip()
+    if (C.run_dir(value) / "run.json").is_file():
+        return value
+    ids = run_ids()
+    for rid in ids:
         data = load_run(rid) or {}
-        if data.get("name") == name_or_id:
+        if str(data.get("name") or "") == value:
             return rid
-    return None
+    pref = [rid for rid in ids if rid.startswith(value)]
+    if len(pref) == 1:
+        return pref[0]
+    low = value.casefold()
+    named = []
+    for rid in ids:
+        data = load_run(rid) or {}
+        name = str(data.get("name") or "")
+        if name and name.casefold().startswith(low):
+            named.append(rid)
+    return named[0] if len(named) == 1 else None
 
 
 class Journal:

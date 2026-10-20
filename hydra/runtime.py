@@ -9,8 +9,14 @@ import threading
 import time
 from pathlib import Path
 
+try:                 # POSIX/Termux; tests may import on other platforms
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
+
 from . import config as C
 from . import caps as Caps
+from . import sessions as S
 from . import httpdebug
 from . import hygiene
 from . import journal as J
@@ -122,6 +128,7 @@ class Runtime:
         self._agent_seq = 0
         self._job_seq = 0
         self._lock = threading.RLock()
+        self._run_lock = None
         self.paused = threading.Event()  # REPL /pause — checked between turns
 
     # -------------------------------------------------- ids
@@ -255,6 +262,55 @@ class Runtime:
             pass
         self._record_nicety("notify", rc == 0, rc, title=title)
 
+    # -------------------------------------------------- run ownership
+    def _lock_run(self, run_id: str) -> None:
+        """Claim a run so two terminals cannot resume it at the same time.
+
+        ``flock`` is released automatically by the kernel if the process dies,
+        which is exactly the lifecycle a run lock needs.  The pid text is for
+        humans and for the boot supervisor; it is never trusted instead of the
+        lock itself.
+        """
+        path = C.run_dir(run_id) / "run.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(path, "a+", encoding="utf-8")
+        try:
+            if fcntl is None:
+                raise OSError("flock unavailable")
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                fh.seek(0)
+                other = fh.read().strip()
+            except Exception:
+                other = ""
+            fh.close()
+            who = f" (pid {other})" if other else ""
+            raise SystemExit(f"hydra: run {run_id} is already active{who}; "
+                             "use another session or wait for it to finish") from None
+        try:
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{os.getpid()}\n")
+            fh.flush()
+        except Exception:
+            pass
+        self._run_lock = fh
+
+    def _unlock_run(self) -> None:
+        fh, self._run_lock = self._run_lock, None
+        if fh is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            fh.close()
+        except Exception:
+            pass
+
     # -------------------------------------------------- run lifecycle
     def _attach_http_log(self) -> None:
         """F4: start appending runs/<id>/http.jsonl for this run (if enabled)."""
@@ -286,6 +342,7 @@ class Runtime:
         with self.web_cache_lock:
             self.web_cache.clear()
         self.run_id = J.new_run_id()
+        self._lock_run(self.run_id)
         self.journal = J.Journal(self.run_id, self.cfg, sink=self.ui.event,
                                  redact=self.redact)
         self._flush_pending_niceties()
@@ -309,6 +366,7 @@ class Runtime:
             chain = list(C.get(self.cfg, "roles.lead.chain") or [])
             self.cfg.setdefault("roles", {}).setdefault("lead", {})["chain"] = \
                 [lead_model] + [m for m in chain if m != lead_model]
+        display_name = str(name or "").strip() or S.auto_name(task)
         lead = Agent("a0", "lead", task, self.cfg, workdir=self.cwd,
                      system_prompt=load_system_prompt("lead"),
                      env_block=self.env_block)
@@ -322,22 +380,31 @@ class Runtime:
         self.agents = {lead.id: lead}
         self.swarm = Swarm(self)
         self._sync_agent_seq()
-        self.run_meta = {"run": self.run_id, "name": name or "", "task": task,
+        self.run_meta = {"run": self.run_id, "name": display_name, "task": task,
                          "cwd": str(self.cwd), "status": "running",
                          "started": time.time(), "pid": os.getpid(),
                          "finished": None, "exit_code": None}
         self.journal.event("run_start", None, task=task, cwd=str(self.cwd),
-                           name=name or "")
+                           name=display_name)
         self.journal.checkpoint(self.run_meta)
         return lead
 
-    def resume(self, which: str = None) -> Agent:
-        rid = J.find_run(which) if which else J.last_run_in(str(self.cwd))
-        if not rid:
-            rid = (J.run_ids() or [None])[0]
-        if not rid:
-            raise SystemExit("hydra: no runs to resume")
+    def resume(self, which: str = None, *, auto: bool = False) -> Agent:
+        if which:
+            rid = S.resolve_run(which)
+            if not rid:
+                raise SystemExit(f"hydra: run not found: {which}")
+        else:
+            rid = S.pick_resume(cwd=str(self.cwd))
+            if not rid:
+                raise SystemExit(
+                    "hydra: no interrupted or parked run to resume\n"
+                    "  list sessions: hydra sessions\n"
+                    "  explicit id:   hydra resume RUN")
         data = J.load_run(rid) or {}
+        if not data:
+            raise SystemExit(f"hydra: run metadata missing for {rid}")
+        self._lock_run(rid)
         events = J.read_events(rid)
         with self.web_cache_lock:
             self.web_cache.clear()
@@ -350,7 +417,9 @@ class Runtime:
         self.cwd = Path(data.get("cwd") or self.cwd)
         self.env_block = build_env_block(self.cwd, self.cfg, role="lead",
                                          caps=self.caps)
-        lead = Agent("a0", "lead", data.get("task", ""), self.cfg, workdir=self.cwd,
+        task = str(data.get("task") or "")
+        display_name = S.title(data)
+        lead = Agent("a0", "lead", task, self.cfg, workdir=self.cwd,
                      system_prompt=load_system_prompt("lead"),
                      env_block=self.env_block)
         lead.data["files_marker"] = str(
@@ -371,7 +440,20 @@ class Runtime:
         self._sync_agent_seq()
         self.run_meta = dict(data)
         self.run_meta["status"] = "running"
-        self.journal.event("run_resume", None)
+        self.run_meta["name"] = display_name
+        self.run_meta["pid"] = os.getpid()
+        self.run_meta["finished"] = None
+        self.run_meta["resumed_at"] = time.time()
+        self.run_meta["resume_count"] = int(data.get("resume_count") or 0) + 1
+        if auto:
+            self.run_meta["auto_resume_attempts"] = int(
+                data.get("auto_resume_attempts") or 0) + 1
+            self.run_meta["auto_resumed_at"] = time.time()
+        # Persist ownership *before* the first model call: the boot supervisor
+        # must not think this run is still an orphan while it is being resumed.
+        self.journal.checkpoint(self.run_meta)
+        self.journal.event("run_resume", None, auto=bool(auto), pid=os.getpid(),
+                           name=display_name)
         self._reattach_jobs()
         # re-attach children that were alive when the process was killed
         try:
@@ -422,6 +504,7 @@ class Runtime:
                 self._hook("error", lead, f"{type(exc).__name__}: {exc}")
             return (75 if parked else 1), (lead.report or {})
         except KeyboardInterrupt:
+            self.run_meta.setdefault("stop_reason", "user")
             self.run_meta.update({"status": "interrupted", "exit_code": 130})
             return 130, (lead.report or {})
         except Exception as exc:
@@ -433,6 +516,10 @@ class Runtime:
             self.run_meta["finished"] = time.time()
             if self.journal:
                 self.journal.checkpoint(self.run_meta)
+            # A finished/interrupted run is no longer executing. Release the
+            # ownership lock now, so the TUI can reopen it (or a boot daemon
+            # can resume it) without waiting for the whole App to close.
+            self._unlock_run()
             if (self.run_meta.get("status") in ("done", "partial")
                     and C.get(self.cfg, "termux.notify_on_finish", True)):
                 self.notify("HYDRA done", str((lead.report or {}).get("summary", ""))[:160])
@@ -460,8 +547,8 @@ class Runtime:
         lead = self.start_run(task, name=name, lead_model=lead_model)
         return self._execute(lead)
 
-    def resume_run(self, which: str = None):
-        lead = self.resume(which)
+    def resume_run(self, which: str = None, *, auto: bool = False):
+        lead = self.resume(which, auto=auto)
         return self._execute(lead)
 
     # -------------------------------------------------- usage / close
@@ -495,6 +582,7 @@ class Runtime:
     def close(self) -> None:
         if self.journal:
             self.journal.close()
+        self._unlock_run()
         try:
             if getattr(self.tools, "mcp", None) is not None:
                 self.tools.mcp.close()

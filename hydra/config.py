@@ -78,7 +78,10 @@ DEFAULTS: dict = {
         "reprobe_days": 7,
         "auto_reprobe_max": 2,    # per hour, first model of each role only
     },
-    "termux": {"wake_lock": True, "notify_on_finish": True, "notify_on_park": True},
+    "termux": {"wake_lock": True, "notify_on_finish": True, "notify_on_park": True,
+               "notify_on_resume": True},
+    "resume": {"auto": True, "max_attempts": 3, "grace_secs": 5,
+               "max_age_hours": 24, "max_run_usd": 0.08},
     "ui": {
         "mode": "inline",         # inline | fullscreen | plain (M2 pty go/no-go passed)
         "theme": "auto",          # auto | dark | light
@@ -199,6 +202,14 @@ git_snapshots = false
 wake_lock        = true
 notify_on_finish = true
 notify_on_park   = true
+notify_on_resume = true
+
+[resume]
+auto           = true             # boot/shell hook resumes a killed run
+max_attempts   = 3                # stop retrying a run that keeps dying
+grace_secs     = 5                # never race a just-started process
+max_age_hours  = 24               # do not auto-resume very old experiments
+max_run_usd    = 0.08             # auto-resume only runs under this spend; 0=off
 
 [park]
 wait_reset    = false

@@ -6,6 +6,37 @@ All notable changes to HYDRA. Dates are local (Termux, Android).
 > hotfix (`62a5a5a`). WO3's final commit now carries the `v1.3.1` tag; the
 > hotfix is preserved as `v1.3.1-taskfocus`.
 
+## v1.3.3 — resume + TUI patch (2026-10-20)
+
+Fixes the "resume does nothing after Termux restarts" report and upgrades the
+TUI session/command flow. No new providers or model work.
+
+### Added / Fixed
+
+- **Bare resume chooses the interrupted run.** `hydra resume` and TUI
+  `/resume` no longer replay the newest `done` run. New runs get a task-derived
+  name; ids and unique name prefixes both resolve.
+- **Named-session picker.** TUI `/resume` opens a list with name, real state
+  (`running` / `interrupted` / `done` …), age, last tool/answer and cwd. The
+  selected interrupted run is one Enter away. `/sessions` and
+  `hydra sessions --full` show the same information.
+- **Grouped command menu.** `/commands` opens a context-aware menu (running vs
+  idle); `/help`, `/keys` and the inline palette remain.
+- **Automatic resume.** `hydra boot install` writes a Termux:Boot script and a
+  marked hook in `~/.bashrc`/`~/.zshrc`. One supervised daemon (`hydra daemon
+  --resume`) continues a killed run in the background, with a kernel run lock,
+  a 24 h age window, a $0.08 pre-existing-spend cap, three-attempt cap, logs
+  and notifications. User-stopped, budget-parked and finished runs are never
+  auto-resumed; expensive interrupted sessions stay in the picker with cost.
+  The daemon waits for the API host to be reachable before consuming an attempt,
+  so a boot before Wi-Fi is ready is harmless. `hydra boot status|stop|uninstall`
+  manages it.
+- **Ownership lock.** `Runtime` takes a per-run `flock` and writes its own pid
+  on resume, so two terminals/daemons cannot resume the same run and the boot
+  supervisor cannot mistake a live resume for an orphan.
+- **Stop intent.** SIGTERM/SIGHUP are recorded as `stop_reason=signal`; Ctrl-C
+  and `/quit` record `user`, so auto-resume only continues what the OS killed.
+
 ## v1.3.2 — WO3.1 patch (2026-10-20)
 
 Closes six trust gaps left by WO3. No new features; behaviour stays

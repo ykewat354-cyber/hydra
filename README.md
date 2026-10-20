@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.3.2, WO3.1 patch).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 405+ stdlib tests (176+ subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. WO3 made reports trustworthy (honest `files_changed`, claim-aware verification, one-port servers, child-file merging), capped verifier cost, measured prompted JSON obedience, and sharpened bench diffs. WO3.1 closes six gaps: a real-model smoke of the trust path, threshold cost colours, `scan_roots` on the card, exact-output prompt + skill, immutable tags with `hydra update` printing the landed tag, and a `hydra footprint` table that adds up.
+> **Status: implemented (v1.3.3, resume + TUI patch).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 430+ stdlib tests (179+ subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. WO3 made reports trustworthy; WO3.1 closed six trust gaps. v1.3.3 makes resume human: named sessions, a `/resume` picker with last activity, a grouped `/commands` menu, and an opt-in boot/shell supervisor that continues a killed run in the background. `hydra boot install` sets it up.
 
 ### Install (one line)
 
@@ -568,6 +568,32 @@ Types: `run_start · agent_spawn · model_request · model_response · tool_call
 4. Background jobs: check the PID in `/proc/<pid>`; mark `lost` if gone.
 5. Re-probe models if the run was parked, then continue.
 
+**Named sessions and the bug fixed in v1.3.3.** New runs get a short name
+derived from the task (or `--name`). `hydra sessions` shows the name, real
+state (`running`, `interrupted`, `done`, …), age and last activity. Bare
+`hydra resume` and TUI `/resume` now choose the newest **interrupted** run — the
+old code picked the newest run even when it was `done`, which looked like
+"resume does nothing". A finished run can still be continued by naming its id
+or name. The TUI `/resume` picker shows names, state, age and last tool/answer
+so you can see what the session was doing.
+
+**Automatic resume after Termux dies.** `hydra boot install` writes
+`~/.termux/boot/hydra-autoresume` (for Termux:Boot) and a marked hook in
+`~/.bashrc` / `~/.zshrc`. The hook starts one lightweight supervisor; a kernel
+`flock` makes duplicate shells harmless. It resumes a run whose recorded PID
+is gone (newest first, 24 h window and $0.08 spend cap by default), writes
+progress to `~/.hydra/daemon.log`, and sends a Termux notification. It never
+auto-resumes a `done`, user-stopped or budget-parked run; a run that keeps dying
+stops after `resume.max_attempts` (3). It waits for the API host to be reachable
+before consuming an attempt, so a Termux:Boot start before Wi-Fi is ready does
+not mark the run failed. Expensive interrupted sessions stay in the picker with
+their cost visible, so continuing one is a deliberate choice.
+`hydra boot status|stop|uninstall` manages it. If Android has force-stopped
+Termux, nothing can run until Termux opens again;
+Termux:Boot is required for a true device-boot start. The supervisor also runs
+while Termux stays open, so a TUI process killed by Android is picked up on its
+next poll.
+
 **`scan_complete` ka matlab (exact meaning, v1.3.2).** `scan_complete=true`
 means only that every chosen root directory was scanned within the budget
 without truncation — it is **not** proof that every write was observed. The
@@ -593,8 +619,11 @@ hydra -i                        same full-screen TUI (interactive)
 hydra --plain "task"            compact stream in this terminal (scripts/pipes)
 hydra --plain -i                the old line-based REPL (for pipes/scripts)
 hydra --detach "task"           tmux + wake-lock + notify on finish
-hydra resume [RUN_ID]           continue after a kill or park
-hydra ls                        list runs
+hydra resume [RUN_ID|NAME]      continue after a kill or park (picker in TUI)
+hydra sessions [--full]         named sessions: state, age, cost, last activity
+hydra ls                        compact run list
+hydra boot install              auto-resume after Termux restarts
+hydra boot status|stop|uninstall
 hydra tail [RUN_ID] [-a AGENT]  follow the event stream
 hydra tree [RUN_ID]             agent tree: status · model · tokens
 hydra models probe|ls|pin       discover / list / pin models
@@ -642,10 +671,12 @@ calls collapse to one line, and the composer stays open while the run continues.
 | `Ctrl-O` | copy the last answer/report to the clipboard |
 | `Ctrl-D` | quit when the composer is empty |
 
-Slash commands: `/help` · `/clear` · `/copy` · `/plan` · `/pause` · `/unpause` ·
-`/resume` · `/tree` · `/kill aN` · `/model role=model` · `/models` · `/cost` ·
-`/note text` · `/undo` · `/runs` · `/doctor` · `/init` · `/keys` · `/quit` ·
-`/verbose`. Custom project commands (`~/.hydra/commands/*.md`) also work.
+Slash commands: `/help` · `/commands` (grouped, context-aware menu) ·
+`/resume` (named-session picker) · `/sessions` · `/runs` · `/clear` · `/copy` ·
+`/plan` · `/pause` · `/unpause` · `/tree` · `/kill aN` · `/model role=model` ·
+`/models` · `/cost` · `/note text` · `/undo` · `/doctor` · `/init` · `/keys` ·
+`/quit` · `/verbose`. Custom project commands (`~/.hydra/commands/*.md`) also
+work.
 
 The transcript has real scrollback: touch-scroll, mouse wheel/drag, `↑/↓` and
 `PgUp/PgDn` move through it, `End` returns to live output, and new output never
@@ -734,9 +765,17 @@ fsync         = "turn"                  # event | turn | never
 git_snapshots = false
 
 [termux]
-wake_lock        = true
-notify_on_finish = true
-notify_on_park   = true
+wake_lock         = true
+notify_on_finish  = true
+notify_on_park    = true
+notify_on_resume  = true
+
+[resume]
+auto          = true                    # boot/shell supervisor
+max_attempts  = 3                       # stop retrying a crash loop
+grace_secs    = 5                       # never race a just-started run
+max_age_hours = 24                      # do not auto-resume old experiments
+max_run_usd   = 0.08                    # skip expensive runs; 0 = no cap
 
 [park]
 wait_reset    = false
