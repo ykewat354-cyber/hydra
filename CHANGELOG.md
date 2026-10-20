@@ -6,6 +6,24 @@ All notable changes to HYDRA. Dates are local (Termux, Android).
 > hotfix (`62a5a5a`). WO3's final commit now carries the `v1.3.1` tag; the
 > hotfix is preserved as `v1.3.1-taskfocus`.
 
+## v1.3.5 — server truth / WO4 (2026-10-21)
+
+- **Finish-time server probe.** The report now carries `served_url`,
+  `served_alive` and `served_probe_at` (`start` / `finish`). HYDRA itself
+  GETs the job URL at finish; a URL seen only at job start is kept as a
+  fallback, never presented as currently open.
+- **Honest card and `/open`.** A live server shows
+  `open  http://… (/open)`; a stopped one shows muted
+  `open  server stopped (was http://…)`, and `/open` refuses with one line.
+- **One server nudge.** If the task asks for a running server and none is
+  alive at finish, the lead gets one nudge. A second dead finish becomes
+  `partial` with `server not running at finish` (also for a prose reply).
+- **Prompt.** Three pinned lines: `bash background=true` not `&`, logs/PIDs
+  under `$TMPDIR`, leave the requested server running and say how to stop it.
+  Pinned baseline remains under 5,000 tokens.
+- **Tests.** Four Q2 black-box cases, the no-tool-after-nudge case, UI card
+  and `/open` checks, and refreshed golden snapshots.
+
 ## v1.3.4 — daemon log flush (2026-10-20)
 
 - **Visible auto-resume logs.** `hydra daemon` now line-buffers stdout when it

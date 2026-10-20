@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.3.4, resume + TUI patch).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 430+ stdlib tests (179+ subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. WO3 made reports trustworthy; WO3.1 closed six trust gaps. v1.3.3 makes resume human: named sessions, a `/resume` picker with last activity, a grouped `/commands` menu, and an opt-in boot/shell supervisor that continues a killed run in the background. `hydra boot install` sets it up.
+> **Status: implemented (v1.3.5, server truth patch).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 440+ stdlib tests (179+ subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. WO3 made reports trustworthy; WO3.1 closed six trust gaps. v1.3.3 makes resume human: named sessions, a `/resume` picker with last activity, a grouped `/commands` menu, and an opt-in boot/shell supervisor that continues a killed run in the background. v1.3.5 makes the closing card tell the truth about servers: finish-time probes, `served_alive`, one nudge, and no `/open` on a dead URL. `hydra boot install` sets it up.
 
 ### Install (one line)
 
