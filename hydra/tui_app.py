@@ -589,8 +589,8 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
 
 COMMANDS = [
     ("/help", "commands and keys"),
-    ("/new", "fresh screen and session"),
-    ("/clear", "clear the screen"),
+    ("/new", "fresh screen: /new <task> stops the run and starts it"),
+    ("/clear", "clear the screen (idle only)"),
     ("/compact", "compact the context now"),
     ("/copy", "copy the last answer / report"),
     ("/open", "open the last served URL"),
@@ -625,12 +625,14 @@ _ARG_COMMANDS = {"/kill", "/model", "/note", "/undo", "/resume",
 
 HELP_TEXT = """\
 Type a task and press Enter. The agent starts immediately; there are no approval
-prompts. While it runs, keep typing to steer it (Enter sends a steer). Ctrl-C
-cancels the in-flight call; press it twice within 2s to stop the run.
+prompts. While it runs, keep typing to steer it (Enter sends a steer; the input
+box says so). /new <task> stops the current run and starts the new task.
+Ctrl-C cancels the in-flight call; press it twice within 2s to stop the run.
 
 commands
   /help              this help
-  /clear             clear the screen (the run keeps going)
+  /clear             clear the screen (idle; refuses while a run is active)
+  /new [task]        fresh screen; with a task, stop the run and start it
   /copy              copy the last answer or report file to the clipboard
   /open [URL]        open the last served link with the system browser
   /expand [N]        show one tool card's full args/output (N from the end)
@@ -793,6 +795,7 @@ class App:
         self.rt = None
         self.thread = None
         self.pending_steers: list = []
+        self.pending_task = ""
         self.quit = False
         self.return_code = 0
         self.sig_stop = False
@@ -1426,6 +1429,8 @@ class App:
         self.current_tool = None
         self._stream_block = None
         self._stream_agent = None
+        pending = self.pending_task
+        self.pending_task = ""
         sep = self.theme.sym("sep")
         self.flash(
             f"{status} {sep} "
@@ -1433,6 +1438,15 @@ class App:
             + (f" {sep} End = latest" if self.scroll else ""),
             2.0)
         self._bump()
+        if pending:
+            # `/new <task>` while running: stop, then start the new task here
+            self.blocks = []
+            self.add_welcome()
+            self.session_cost = 0.0
+            self._report_seen = False
+            self.scroll = 0
+            self.add_notice(f"new task: {pending}")
+            self.start_run(pending)
 
     # -------------------------------------------------- render
     def _rows_for(self, b: Block, width: int, live: bool) -> list:
@@ -1741,7 +1755,7 @@ class App:
             if self.paste_chip:
                 placeholder = self.paste_chip
             else:
-                placeholder = ("type to steer, enter to send" if self.running
+                placeholder = ("steer this run · esc stops" if self.running
                                else "Ask HYDRA to build, fix, debug or research")
         box = [[(U.clip_display(self.theme.sym("box_tl")
                                 + self.theme.sym("box_h") * max(1, width - 2)
@@ -2258,7 +2272,7 @@ class App:
             if lead is not None:
                 try:
                     lead.send(text)
-                    self.flash("steer sent", 1.5)
+                    self.flash("steer sent · esc stops the run", 2.0)
                 except Exception as exc:
                     self.add_notice(f"steer failed: {exc}", "warn")
             else:
@@ -2514,12 +2528,29 @@ class App:
             self.add_notice(KEYS_TEXT)
             return
         if cmd in ("/clear", "/new"):
+            if self.running:
+                if cmd == "/new" and arg:
+                    self.pending_task = arg
+                    self.request_stop()
+                    self.add_notice("stopping this run — the new task starts "
+                                    "automatically", "warn")
+                elif cmd == "/new":
+                    self.add_notice("a run is active — /new <task> stops it "
+                                    "and starts fresh", "warn")
+                else:
+                    self.add_notice("the run is still active — /clear after it "
+                                    "stops (or /new <task> starts fresh)", "warn")
+                return
             self.blocks = []
             self.add_welcome()
             self.scroll = 0
             self._report_seen = False
             if cmd == "/new":
                 self.session_cost = 0.0
+                if arg:
+                    self.add_notice(f"new task: {arg}")
+                    self.start_run(arg)
+                    return
             self.flash("screen cleared", 1.2)
             return
         if cmd == "/copy":

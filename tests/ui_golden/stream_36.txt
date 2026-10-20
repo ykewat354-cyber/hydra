@@ -26,6 +26,6 @@ calc.py:
 Now writing the final summary▍      
 ▖ Responding…  4.5s · ↓ 900 tok     
 ╭──────────────────────────────────╮
-│ ❯ type to steer, enter to send   │
+│ ❯ steer this run · esc stops     │
 ╰──────────────────────────────────╯
  ctx 18% · $0           nemotron-3-…

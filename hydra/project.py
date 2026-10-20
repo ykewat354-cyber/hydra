@@ -306,6 +306,18 @@ def workspace_summary(cwd, cfg=None) -> str:
     names = [e.name + ("/" if _is_dir(e) else "") for e in entries[:limit]]
     if not names:
         return ""
+    try:
+        at_home = cwd == Path.home().resolve()
+    except Exception:
+        at_home = False
+    if at_home:
+        # The home directory is not a project. Listing nested projects and
+        # their "recent files" here made every task (even "hi") look like a
+        # request to continue the last website (bug 2026-10-20).
+        return ("# Workspace (home, not a project)\n"
+                "entries: " + " ".join(names) + "\n"
+                "note: the home directory is not a project. Nothing here is "
+                "'the current project'; work in the directory the task names.")
     lines = ["# Workspace (cwd)", "entries: " + " ".join(names)]
     plimit = int(C.get(cfg, "project.workspace_projects", 5) or 5) if cfg else 5
 

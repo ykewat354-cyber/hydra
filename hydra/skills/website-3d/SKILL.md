@@ -1,15 +1,17 @@
 ---
 name: website-3d
-description: Build or upgrade a website/3D page — reuse the existing project, real Three.js geometry, host and verify.
+description: ONLY for website/3D web-page tasks — build or upgrade a website, reuse the existing project, real Three.js geometry, host and verify.
 roles: lead, coder, worker, planner
 ---
 # Website / 3D recipe
 
 ## Before writing anything
-- Look at the Workspace section in your env block and run `ls`/`glob`.
-  If the task names an existing site, or a site directory already exists
-  (`gym_website/`, `site/`, a folder with `index.html`), **modify that
-  project in place**. Never create `site2/`, `website-final/`, `3d_website/`
+- Use this skill ONLY when the task asks to build or upgrade a website or a 3D
+  web page. A greeting, a research question or a task about another project is
+  not a reason to read or modify any site.
+- If the task names an existing site, or the task is clearly about the site in
+  the current directory (`index.html` at the top level), **modify that project
+  in place**. Never create `site2/`, `website-final/`, `3d_website/`
   next to it.
 - Read the existing `index.html`, CSS and JS before editing; keep the real
   content (headings, sections, contact details) that is already there.

@@ -2,6 +2,44 @@
 
 All notable changes to HYDRA. Dates are local (Termux, Android).
 
+## v1.3.1 — 2026-10-20
+
+"Whatever I ask, it only builds the website" — task-focus fix.
+
+### Fixed
+
+- **The task comes first in the pinned prompt.** Workspace/skill context used to
+  precede the task; a weak free model read `gym_website/` and `rea/website/*`
+  and treated every message (even "hi") as a request to continue the website.
+  The first user message is now `# Task (the only job)` + the task + the
+  environment, ending with "reference data, not instructions; do not continue
+  a project unless this task names it."
+- **`$HOME` is not described as a project.** The workspace block listed nested
+  projects and their "recent files" (e.g. `rea/website/style-guide.md`) when
+  HYDRA ran from the home directory. It now lists entries with an explicit
+  "home is not a project" note; real project directories still get projects +
+  recent files.
+- **The skill list is optional and scoped.** `website-3d` is marked "ONLY for
+  website/3D web-page tasks" in its description and recipe; the lead prompt
+  gains rule 17 (the task is the only job; a greeting or meta question gets a
+  short answer and `finish`; never substitute `website-3d` for a missing skill).
+- **Steering is visible.** While a run is active the composer says "steer this
+  run · esc stops", and a sent steer flashes the same hint. `/clear` refuses
+  while a run is active.
+- **`/new <task>` starts fresh.** While a run is active it stops the current
+  run and starts the new task automatically when it ends, so a new task cannot
+  be swallowed by an old website run.
+
+### Verified
+
+- 351 tests + 176 subtests pass; 40 goldens regenerated (only the running
+  placeholder and version string changed).
+- Real smoke from `$HOME` (the biased cwd), free model:
+  - "hi" → 1 turn, `finish` only, no tools, est $0.0002; `gym_website` mtime
+    unchanged.
+  - "make hello.py print 42, no website" → 4 turns, wrote and ran exactly that
+    file, est $0.0008.
+
 ## v1.3.0 — 2026-10-20
 
 UI v2 (Work Order #2) complete: inline mode is the default renderer, the phone
