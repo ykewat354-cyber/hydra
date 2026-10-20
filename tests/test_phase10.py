@@ -380,6 +380,7 @@ class AppMoreTests(AppTests):
 
     def test_sidebar_and_narrow_layout(self):
         app = self._app()
+        app.ui_mode = "fullscreen"        # the sidebar is a fullscreen feature
         app.event({"type": "run_start", "run": "r_wide", "task": "x",
                    "cwd": self.cwd.name, "ts": time.time()})
         app.drain()
@@ -501,6 +502,7 @@ class PtySmokeTests(unittest.TestCase):
                     "--set", "api.host=http://127.0.0.1:1",
                     "--set", "termux.wake_lock=false",
                     "--set", "termux.notify_on_finish=false",
+                    "--set", "ui.mode=fullscreen",
                 ], env)
             except BaseException:
                 os._exit(127)

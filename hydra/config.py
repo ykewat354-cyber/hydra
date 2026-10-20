@@ -73,7 +73,7 @@ DEFAULTS: dict = {
     },
     "termux": {"wake_lock": True, "notify_on_finish": True, "notify_on_park": True},
     "ui": {
-        "mode": "fullscreen",     # inline | fullscreen | plain (WO2 M2 decides)
+        "mode": "inline",         # inline | fullscreen | plain (M2 pty go/no-go passed)
         "theme": "auto",          # auto | dark | light
         "glyphs": "auto",         # auto(=safe) | safe | rich | ascii
         "density": "auto",        # auto | compact | comfortable

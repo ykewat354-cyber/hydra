@@ -223,7 +223,8 @@ class PtyTerminalStateTests(unittest.TestCase):
                     "--set", "api.host=http://127.0.0.1:1",
                     "--set", "termux.wake_lock=false",
                     "--set", "termux.notify_on_finish=false",
-                    "--set", "termux.notify_on_park=false"]),
+                    "--set", "termux.notify_on_park=false",
+                    "--set", "ui.mode=fullscreen"]),
                 cwd=self.cwd.name, env=self.env,
                 stdin=slave, stdout=slave, stderr=slave)
         finally:
@@ -274,7 +275,8 @@ class PtyTerminalStateTests(unittest.TestCase):
                 raise RuntimeError("simulated crash inside app loop")
             App.drain = boom
             from hydra import config as C
-            cfg = C.load_config(overrides=["api.host=http://127.0.0.1:1"],
+            cfg = C.load_config(overrides=["api.host=http://127.0.0.1:1",
+                                           "ui.mode=fullscreen"],
                                 project_dir=".")
             sys.exit(App(cfg, cwd=".").run())
         '''), encoding="utf-8")

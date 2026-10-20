@@ -39,6 +39,7 @@ from . import config as C
 from . import journal as J
 from . import ui_format as U
 from . import ui_theme as UT
+from . import tui_inline as TI
 
 # ------------------------------------------------------------------ theme
 
@@ -747,6 +748,12 @@ class App:
         self.steer_queued = 0
         self.paste_chip = None
         self._welcome_idx = None
+        # inline mode bookkeeping (WO2 M2): rows already committed to the
+        # terminal's scrollback, the current live-region height, and how many
+        # rows the caret sits above the region bottom.
+        self._inline_printed = 0
+        self._inline_h = 0
+        self._inline_below = 0
         self._report_seen = False
         self._reported_agents: set = set()
         self._stream_block = None
@@ -982,6 +989,10 @@ class App:
 
         if t == "agent_end":
             a = self._ensure_agent(aid, status=ev.get("status") or "done")
+            for b in reversed(self.blocks):
+                if b.kind == "spawn" and b.meta.get("id") == aid:
+                    b.meta["state"] = a.status      # inline: row stops ticking
+                    break
             if aid not in self._reported_agents and aid != "a0":
                 self.add_notice(f"{aid} {a.role} ended "
                             f"{self.theme.sym('sep')} {a.status}")
@@ -1354,11 +1365,11 @@ class App:
         self._bump()
 
     # -------------------------------------------------- render
-    def _transcript_lines(self, width: int) -> list:
-        key = (width, self.verbose, self._rev)
-        if key == self._cache_key:
-            return self._cache_lines
-        lines = []
+    def _block_rows(self, width: int) -> list:
+        """``[(block, rows)]`` in transcript order, spacing applied.
+
+        A ``None`` block marks the blank separator row between blocks."""
+        out: list = []
         last_kind = None
         for b in self.blocks:
             rows = render_block(b, width, self.theme, self.verbose)
@@ -1367,10 +1378,17 @@ class App:
             quiet = (b.kind in ("tool",) and last_kind == "tool") or \
                     (b.kind in ("notice", "warn", "error")
                      and last_kind in ("notice", "warn", "error"))
-            if lines and not quiet:
-                lines.append(("", ""))
-            lines.extend(rows)
+            if out and not quiet:
+                out.append((None, [("", "")]))
+            out.append((b, rows))
             last_kind = b.kind
+        return out
+
+    def _transcript_lines(self, width: int) -> list:
+        key = (width, self.verbose, self._rev)
+        if key == self._cache_key:
+            return self._cache_lines
+        lines = [r for _b, rows in self._block_rows(width) for r in rows]
         total = len(lines)
         if self.scroll > 0 and total != self._last_total:
             # keep the reader's place: new output shifts the window, it never
@@ -1503,10 +1521,10 @@ class App:
             if self.tokens_out or self.tokens_in:
                 left.append((f" {sep} ↓ {U.fmt_tokens(self.tokens_out)} tok",
                          "muted"))
-            if self.scroll:
+            if self.scroll and self.ui_mode != "inline":
                 left.append((f" {sep} ↑{self.scroll} more", "muted"))
             right_text = "esc to stop"
-        elif self.scroll:
+        elif self.scroll and self.ui_mode != "inline":
             left = [(f"↑{self.scroll} more", "muted"),
                     (f" {sep} End = live", "accent")]
             right_text = ""
@@ -2576,7 +2594,22 @@ class App:
         except Exception:
             pass
 
+    def _spans_bytes(self, spans) -> str:
+        """One row's spans to bytes; colour is reset after every run."""
+        out: list = []
+        for text, style in spans:
+            code = self.theme.s(style)
+            if code:
+                out.append(code)
+                out.append(text)
+                out.append("\x1b[0m")
+            else:
+                out.append(text)
+        return "".join(out)
+
     def draw(self):
+        if self.ui_mode == "inline":
+            return self._draw_inline()
         w, h = self._term_size()
         if (w, h) != (self.width, self.height):
             self.width, self.height = w, h
@@ -2586,14 +2619,7 @@ class App:
         out = ["\x1b[H"]
         for i, spans in enumerate(rows):
             out.append("\x1b[2K")
-            for text, style in spans:
-                code = self.theme.s(style)
-                if code:
-                    out.append(code)
-                    out.append(text)
-                    out.append("\x1b[0m")
-                else:
-                    out.append(text)
+            out.append(self._spans_bytes(spans))
             if i < len(rows) - 1:
                 out.append("\r\n")
         out.append("\x1b[?25l")
@@ -2601,6 +2627,63 @@ class App:
             r, c = cursor
             out.append(f"\x1b[{r + 1};{c + 1}H\x1b[?25h")
         self._write("".join(out))
+        self._last_draw = time.monotonic()
+        self._force = False
+        self._dirty = False
+
+    def _compose_inline(self, width: int, height: int):
+        """Inline frame: ``(committed_rows, live_span_rows, cursor)``.
+
+        Committed rows are printed once into the terminal's own scrollback;
+        only the live region is repainted (WO2 §5.2)."""
+        committed_rows, live_rows = TI.split_blocks(self._block_rows(width))
+        max_live = max(2, int(height) - 1)
+        if len(live_rows) > max_live:
+            # a long live tail would not fit on screen: commit its head
+            cut = len(live_rows) - max_live
+            committed_rows = committed_rows + live_rows[:cut]
+            live_rows = live_rows[cut:]
+        palette = self._palette_rows(width)
+        status_lines = self._status(width)
+        box, cur_row, cur_col = self._input_box(
+            width, min(6, max(1, height // 5)))
+        live = [r if isinstance(r, list) else [r] for r in live_rows]
+        live += palette
+        live += status_lines
+        box_start = len(live)
+        live += box
+        live.append(self._footer(width))
+        cursor = (box_start + cur_row, cur_col)
+        return list(committed_rows), live, cursor
+
+    def _draw_inline(self):
+        w, h = self._term_size()
+        if (w, h) != (self.width, self.height):
+            self.width, self.height = w, h
+            self._cache_key = None
+        committed, live, cursor = self._compose_inline(self.width, self.height)
+        if len(committed) < self._inline_printed:
+            # the composition shrank (resize): screen content stays, new rows
+            # continue from what is already printed
+            self._inline_printed = len(committed)
+        new_committed = committed[self._inline_printed:]
+        chunks: list = []
+        if new_committed:
+            chunks += TI.unprint(self._inline_h, self._inline_below)
+            self._inline_h = 0
+            self._inline_below = 0
+            for row in new_committed:
+                spans = row if isinstance(row, list) else [row]
+                chunks.append("\r\x1b[2K")
+                chunks.append(self._spans_bytes(spans))
+                chunks.append("\r\n")
+            self._inline_printed = len(committed)
+        rendered = [self._spans_bytes(sp) for sp in live]
+        pchunks, drawn, below = TI.paint(rendered, self._inline_h,
+                                         self._inline_below, cursor, self.width)
+        chunks += pchunks
+        self._inline_h, self._inline_below = drawn, below
+        self._write("".join(chunks))
         self._last_draw = time.monotonic()
         self._force = False
         self._dirty = False
@@ -2633,18 +2716,30 @@ class App:
         # v1.2.4: do NOT capture the mouse by default.  `?1007h` is
         # alternate-scroll: a swipe arrives as arrow keys, while Termux keeps
         # native swipe-scroll and long-press selection (WO2 D8 / §5.2).
-        seq = ("\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1007h"
-               "\x1b[2J\x1b[H")
-        if self.mouse_opt:
-            seq = ("\x1b[?1049h\x1b[?25l\x1b[?2004h"
-                   "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h"
+        if self.ui_mode == "inline":
+            # no alternate screen, no clear: the transcript lives in the real
+            # scrollback and the terminal keeps its own gestures
+            seq = "\x1b[?25l\x1b[?2004h\x1b[?1007h"
+        else:
+            seq = ("\x1b[?1049h\x1b[?25l\x1b[?2004h\x1b[?1007h"
                    "\x1b[2J\x1b[H")
+            if self.mouse_opt:
+                seq = ("\x1b[?1049h\x1b[?25l\x1b[?2004h"
+                       "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?1007h"
+                       "\x1b[2J\x1b[H")
         self._write(seq)
 
     def _restore_terminal(self):
         try:
-            self._write("\x1b[?1007l\x1b[?1006l\x1b[?1002l\x1b[?1000l"
-                        "\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l")
+            if self.ui_mode == "inline":
+                seq = "".join(TI.unprint(self._inline_h, self._inline_below))
+                self._inline_h = 0
+                self._inline_below = 0
+                seq += "\x1b[?2004l\x1b[?1007l\x1b[?25h\x1b[0m"
+                self._write(seq)
+            else:
+                self._write("\x1b[?1007l\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+                            "\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l")
         except Exception:
             pass
         if self._old_term is not None:
@@ -2682,8 +2777,11 @@ class App:
                 if self._resize:
                     self._resize = False
                     self._cache_key = None
-                    self._write("\x1b[2J")
-                    self.draw()
+                    if self.ui_mode == "inline":
+                        self.draw()
+                    else:
+                        self._write("\x1b[2J")
+                        self.draw()
                 if self.running:
                     timeout = 0.08
                 else:
