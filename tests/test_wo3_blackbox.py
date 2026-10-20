@@ -151,12 +151,22 @@ class Blackbox(unittest.TestCase):
             "tool_calls": [{"function": {"name": "finish", "arguments": {
                 "status": "done",
                 "summary": f"Served the site on http://127.0.0.1:{port} — HTTP 200."}}}],
-        }, {"content": '{"verdict":"pass","issues":[]}'}]
+        }, {
+            "content": "still stopped",
+            "tool_calls": [{"function": {"name": "finish", "arguments": {
+                "status": "done",
+                "summary": f"Served the site on http://127.0.0.1:{port} — HTTP 200."}}}],
+        }]
         _p, rep, events = self.run_cli(
             "Serve the site on one port, check it returns 200, then finish",
             script)
         self.assertTrue(str(rep.get("served_url") or "").startswith(
             f"http://127.0.0.1:{port}"), rep)
+        self.assertFalse(rep.get("served_alive"), rep)
+        self.assertEqual("start", rep.get("served_probe_at"), rep)
+        self.assertEqual("partial", rep.get("status"), rep)
+        self.assertIn("server not running at finish",
+                      "\n".join(rep.get("open_issues") or []))
         probes = [e for e in events if e.get("type") == "served_probe"
                   and int(e.get("status") or 0) == 200]
         self.assertTrue(probes, events[-20:])
@@ -352,6 +362,131 @@ class Blackbox(unittest.TestCase):
                           "\n".join(rep.get("open_issues") or []))
         finally:
             httpd.shutdown()
+
+    # ---------------------------------------------------------------- Q2
+    def test_q2_nudge_restarts_a_stopped_server(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        cmd = f"timeout 20 python -m http.server {port}"
+        script = [
+            {"content": "start", "tool_calls": [{"function": {
+                "name": "bash", "arguments": {"cmd": cmd, "background": True}}}]},
+            {"content": "stop too early", "tool_calls": [{"function": {
+                "name": "job_kill", "arguments": {"id": "j1"}}}]},
+            {"content": "finish", "tool_calls": [{"function": {
+                "name": "finish", "arguments": {
+                    "status": "done", "summary": "served the site"}}}]},
+            {"content": "restart after the nudge", "tool_calls": [{"function": {
+                "name": "bash", "arguments": {"cmd": cmd, "background": True}}}]},
+            {"content": "finish alive", "tool_calls": [{"function": {
+                "name": "finish", "arguments": {
+                    "status": "done", "summary": "served the site"}}}]},
+            {"content": '{"verdict":"pass","issues":[]}'},
+        ]
+        p, rep, events = self.run_cli(
+            "Serve the site on one port, check it returns 200, then finish",
+            script)
+        self.assertEqual("done", rep.get("status"), p.stdout[-2000:])
+        self.assertTrue(rep.get("served_alive"), rep)
+        self.assertEqual("finish", rep.get("served_probe_at"), rep)
+        self.assertTrue(str(rep.get("served_url") or "").startswith(
+            f"http://127.0.0.1:{port}"), rep)
+        self.assertEqual(1, len([e for e in events
+                                 if e.get("type") == "server_nudge"]), events[-30:])
+        self.assertFalse([e for e in events if e.get("type") == "server_finish"])
+
+    def test_q2_ignored_nudge_finishes_partial(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        cmd = f"timeout 20 python -m http.server {port}"
+        script = [
+            {"content": "start", "tool_calls": [{"function": {
+                "name": "bash", "arguments": {"cmd": cmd, "background": True}}}]},
+            {"content": "stop", "tool_calls": [{"function": {
+                "name": "job_kill", "arguments": {"id": "j1"}}}]},
+            {"content": "finish", "tool_calls": [{"function": {
+                "name": "finish", "arguments": {
+                    "status": "done", "summary": "served the site"}}}]},
+            {"content": "finish anyway", "tool_calls": [{"function": {
+                "name": "finish", "arguments": {
+                    "status": "done", "summary": "served the site"}}}]},
+        ]
+        p, rep, events = self.run_cli(
+            "Serve the site on one port, check it returns 200, then finish",
+            script)
+        self.assertEqual("partial", rep.get("status"), p.stdout[-2000:])
+        self.assertFalse(rep.get("served_alive"), rep)
+        self.assertEqual("start", rep.get("served_probe_at"), rep)
+        self.assertIn("server not running at finish",
+                      "\n".join(rep.get("open_issues") or []))
+        self.assertEqual(1, len([e for e in events
+                                 if e.get("type") == "server_nudge"]), events[-30:])
+        self.assertTrue([e for e in events if e.get("type") == "server_finish"])
+
+    def test_q2_prose_after_nudge_is_not_silent_done(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        cmd = f"timeout 20 python -m http.server {port}"
+        script = [
+            {"content": "start", "tool_calls": [{"function": {
+                "name": "bash", "arguments": {"cmd": cmd, "background": True}}}]},
+            {"content": "stop", "tool_calls": [{"function": {
+                "name": "job_kill", "arguments": {"id": "j1"}}}]},
+            {"content": "finish", "tool_calls": [{"function": {
+                "name": "finish", "arguments": {
+                    "status": "done", "summary": "served the site"}}}]},
+            {"content": "I cannot keep it running."},
+        ]
+        p, rep, _events = self.run_cli(
+            "Serve the site on one port, check it returns 200, then finish",
+            script)
+        self.assertEqual("partial", rep.get("status"), p.stdout[-2000:])
+        self.assertIn("server not running at finish",
+                      "\n".join(rep.get("open_issues") or []))
+        self.assertTrue(str(rep.get("served_url") or "").startswith(
+            f"http://127.0.0.1:{port}"), rep)
+
+    def test_q2_live_server_needs_no_nudge(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        cmd = f"timeout 20 python -m http.server {port}"
+        script = [
+            {"content": "start", "tool_calls": [{"function": {
+                "name": "bash", "arguments": {"cmd": cmd, "background": True}}}]},
+            {"content": "finish", "tool_calls": [{"function": {
+                "name": "finish", "arguments": {
+                    "status": "done", "summary": "served the site"}}}]},
+            {"content": '{"verdict":"pass","issues":[]}'},
+        ]
+        p, rep, events = self.run_cli(
+            "Serve the site on one port and leave it running", script)
+        self.assertEqual("done", rep.get("status"), p.stdout[-2000:])
+        self.assertTrue(rep.get("served_alive"), rep)
+        self.assertEqual("finish", rep.get("served_probe_at"), rep)
+        self.assertFalse([e for e in events if e.get("type") == "server_nudge"])
+        self.assertEqual([], rep.get("open_issues") or [])
+
+    def test_q2_no_server_task_has_no_nudge(self):
+        script = [
+            {"content": "finish", "tool_calls": [{"function": {
+                "name": "finish", "arguments": {
+                    "status": "done", "summary": "repository summarised"}}}]},
+            {"content": '{"verdict":"pass","issues":[]}'},
+        ]
+        p, rep, events = self.run_cli("Summarise the repository in one line.",
+                                      script)
+        self.assertEqual("done", rep.get("status"), p.stdout[-2000:])
+        self.assertFalse(rep.get("served_requested"), rep)
+        self.assertEqual("", rep.get("served_url"), rep)
+        self.assertFalse([e for e in events if e.get("type") == "server_nudge"])
 
     # ---------------------------------------------------------------- A5
     def test_a5_parent_report_merges_child_files(self):

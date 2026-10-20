@@ -626,6 +626,19 @@ def _live_get(url: str):
         return 0
 
 
+_SERVER_TASK_RE = re.compile(
+    r"\b(?:serve|serving|localhost|port|"
+    r"start\s+the\s+(?:site|app|server)|"
+    r"run\s+the\s+(?:site|app|server)|"
+    r"leave\s+(?:it|the\s+\w+)\s+running)\b",
+    re.IGNORECASE)
+
+
+def task_requests_server(task) -> bool:
+    """Whether the task asks the agent to leave a server/site running."""
+    return bool(_SERVER_TASK_RE.search(str(task or "")))
+
+
 def _server_jobs(agent) -> list:
     rt = getattr(agent, "runtime", None)
     out = []
@@ -644,6 +657,44 @@ def _server_jobs(agent) -> list:
                     "state": "running" if alive else "exited",
                     "served_url": str(job.get("served_url") or "")})
     return out
+
+
+def _finish_server_state(agent) -> dict:
+    """Probe this run's server at finish; keep the start probe as fallback.
+
+    ``served_alive`` is true only when HYDRA's own GET at finish returns 200.
+    A URL remembered from the job-start probe is still reported, but marked
+    with ``served_probe_at='start'`` and never presented as currently open.
+    """
+    jobs = _server_jobs(agent)
+    for job in reversed(jobs):
+        url = str(job.get("url") or job.get("served_url") or "")
+        if url and _live_get(url) == 200:
+            return {"served_url": url, "served_alive": True,
+                    "served_probe_at": "finish", "jobs": jobs}
+    for job in reversed(jobs):
+        if job.get("served_url"):
+            return {"served_url": str(job["served_url"]), "served_alive": False,
+                    "served_probe_at": "start", "jobs": jobs}
+    for job in reversed(jobs):
+        if job.get("url"):
+            return {"served_url": str(job["url"]), "served_alive": False,
+                    "served_probe_at": "finish", "jobs": jobs}
+    return {"served_url": "", "served_alive": False,
+            "served_probe_at": "", "jobs": jobs}
+
+
+def _apply_server_state(agent, state: dict) -> None:
+    rep = agent.report if isinstance(agent.report, dict) else None
+    if rep is None:
+        return
+    rep["served_url"] = str(state.get("served_url") or "")
+    rep["served_alive"] = bool(state.get("served_alive"))
+    rep["served_probe_at"] = str(state.get("served_probe_at") or "")
+    rep["served_requested"] = task_requests_server(
+        getattr(agent, "task", ""))
+    if state.get("jobs"):
+        rep["jobs"] = list(state["jobs"])
 
 
 def audit_claims(agent) -> dict:
@@ -721,23 +772,27 @@ def audit_claims(agent) -> dict:
                 issues.append({"what": f"claim: {label}; latest evidence is a "
                                        f"failure",
                                "fix": "fix the failure and run it again"})
-    jobs = _server_jobs(agent)
-    if not served_url:
-        for job in reversed(jobs):
-            if job["state"] != "running":
-                continue
-            if _live_get(job["url"]) == 200:
-                served_url = job["url"]
-            break
-    if not served_url:
-        # P1/A4: HYDRA probed the job URL right after job_start; use that
-        # bounded, real GET even if the agent stopped the server before finish.
-        for job in reversed(jobs):
-            if job.get("served_url"):
-                served_url = str(job["served_url"])
-                break
+    # Q2: the finish probe is authoritative.  Keep the job-start probe only
+    # as a fallback, clearly marked so the card never says a dead server is open.
+    state = _finish_server_state(agent)
+    jobs = state["jobs"]
+    if state["served_url"]:
+        served_url = str(state["served_url"])
+        alive = bool(state["served_alive"])
+        probe_at = str(state["served_probe_at"] or "")
+    elif served_url:
+        # A verified HTTP-200 claim without a tracked job (e.g. an existing
+        # local server): keep the URL, but still probe it at finish.
+        alive = _live_get(served_url) == 200
+        probe_at = "finish"
+    else:
+        alive = False
+        probe_at = ""
+    if served_url and not probe_at:
+        probe_at = "finish"
     return {"issues": issues[:8], "evidence": sorted(set(evidence)),
-            "served_url": served_url, "claims": claims, "jobs": jobs}
+            "served_url": served_url, "served_alive": alive,
+            "served_probe_at": probe_at, "claims": claims, "jobs": jobs}
 
 
 def _verify_cost(rt, reply) -> float:
@@ -761,16 +816,31 @@ def check(rt, agent) -> dict:
         pre = deterministic_issues(agent)
     except Exception:
         pre = []
-    audit = {"issues": [], "evidence": [], "served_url": "", "claims": []}
+    audit = {"issues": [], "evidence": [], "served_url": "",
+             "served_alive": False, "served_probe_at": "", "claims": [],
+             "jobs": []}
     try:
         audit = audit_claims(agent)
     except Exception:
         pass
+    if not audit.get("served_probe_at") and not audit.get("jobs"):
+        try:
+            state = _finish_server_state(agent)
+            audit.update({"served_url": state["served_url"],
+                          "served_alive": state["served_alive"],
+                          "served_probe_at": state["served_probe_at"],
+                          "jobs": state["jobs"]})
+        except Exception:
+            pass
     issues = list(pre) + list(audit.get("issues") or [])
     if audit.get("evidence"):
         rep["evidence"] = sorted(set(int(x) for x in audit["evidence"]))
-    if audit.get("served_url"):
-        rep["served_url"] = str(audit["served_url"])
+    # Q2 report contract: URL, liveness, and where the probe came from.
+    rep["served_url"] = str(audit.get("served_url") or "")
+    rep["served_alive"] = bool(audit.get("served_alive"))
+    rep["served_probe_at"] = str(audit.get("served_probe_at") or "")
+    rep["served_requested"] = task_requests_server(
+        getattr(agent, "task", ""))
     if audit.get("jobs"):
         rep["jobs"] = list(audit["jobs"])
     if issues:
@@ -924,8 +994,94 @@ def check(rt, agent) -> dict:
             "verify_tool_calls": rep["verify_tool_calls"]}
 
 
+def finish_after_server_nudge(agent) -> None:
+    """No-tool reply after the Q2 nudging turn: finish honestly.
+
+    A live server makes the existing finish valid.  A dead one is partial with
+    the reason attached; the model does not get a second nudge.
+    """
+    rep = agent.report if isinstance(agent.report, dict) else None
+    if rep is None:
+        return
+    state = _finish_server_state(agent)
+    _apply_server_state(agent, state)
+    if state.get("served_alive"):
+        return
+    if str(rep.get("status") or "") == "done":
+        rep["status"] = "partial"
+    issues = rep.setdefault("open_issues", [])
+    msg = "server not running at finish"
+    if state.get("served_url"):
+        msg += f" (last URL {state['served_url']})"
+    if msg not in issues:
+        issues.append(msg)
+    rt = getattr(agent, "runtime", None)
+    if rt is not None and getattr(rt, "journal", None) is not None:
+        try:
+            rt.journal.event("server_finish", agent.id, verdict="partial",
+                             url=state.get("served_url") or "",
+                             probe_at=state.get("served_probe_at") or "",
+                             reason=msg)
+        except Exception:
+            pass
+
+
+def _server_finish_gate(rt, agent) -> bool:
+    """Q2: one nudge when a server task finishes with no live server.
+
+    Returns True when the loop should continue for the nudge.  On the second
+    finish, marks the report partial instead of nudging again.
+    """
+    rep = agent.report if isinstance(agent.report, dict) else None
+    if rep is None:
+        return False
+    state = _finish_server_state(agent)
+    _apply_server_state(agent, state)
+    if not task_requests_server(getattr(agent, "task", "")):
+        return False
+    if str(rep.get("status") or "") not in ("done", "partial"):
+        return False
+    if state.get("served_alive"):
+        return False
+    if not agent.data.get("server_finish_nudged"):
+        agent.data["server_finish_nudged"] = True
+        agent.finished = False
+        agent.nudge("The task asked for a running server; yours is stopped. "
+                    "Start it again or explain why.")
+        if rt.journal:
+            try:
+                rt.journal.event("server_nudge", agent.id,
+                                 url=state.get("served_url") or "",
+                                 probe_at=state.get("served_probe_at") or "")
+            except Exception:
+                pass
+        return True
+    agent.data["server_finish_partial"] = True
+    if str(rep.get("status") or "") == "done":
+        rep["status"] = "partial"
+    issues = rep.setdefault("open_issues", [])
+    msg = "server not running at finish"
+    if state.get("served_url"):
+        msg += f" (last URL {state['served_url']})"
+    if msg not in issues:
+        issues.append(msg)
+    if rt.journal:
+        try:
+            rt.journal.event("server_finish", agent.id, verdict="partial",
+                             url=state.get("served_url") or "",
+                             probe_at=state.get("served_probe_at") or "",
+                             reason=msg)
+        except Exception:
+            pass
+    return False
+
+
 def run_once(rt, agent) -> bool:
     """Verify after a finish. Returns True if the loop should continue (failed)."""
+    if _server_finish_gate(rt, agent):
+        return True
+    if agent.data.get("server_finish_partial"):
+        return False
     if not should_verify(rt.cfg, agent):
         return False
     if int(getattr(agent, "verify_rounds_left", 0) or 0) <= 0:

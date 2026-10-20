@@ -107,6 +107,13 @@ def run_agent(agent, rt) -> dict:
                     rt.journal.event("parsed_from_text", agent.id, n=len(calls))
 
                 if not calls:
+                    if (agent.data.get("server_finish_nudged")
+                            and not agent.data.get("server_finish_partial")):
+                        # Q2: after the one server nudge, a prose reply is the
+                        # final answer.  Do not let finish_from_text turn a dead
+                        # server into a silent "done".
+                        verifier.finish_after_server_nudge(agent)
+                        break
                     if agent.nudges < 1:
                         agent.nudge("No tool call detected. Continue the task with tools, "
                                     "or call finish(status, summary) if you are done.")

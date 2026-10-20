@@ -563,11 +563,16 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
                         + U.end_ellipsis(reason, max(8, width - 14)), "warn"))
         elif verify.get("verdict") == "skipped":
             out.append(("   verify  skipped", "dim"))
-        url = str(m.get("open_url") or "")
-        if url and status == "done":
-            out.append(("   open    "
-                        + U.end_ellipsis(url, max(8, width - 19)) + " (/open)",
-                        "info"))
+        url = str(m.get("served_url") or "")
+        if url and status in ("done", "partial") and m.get("served_requested", False):
+            if m.get("served_alive"):
+                out.append(("   open    "
+                            + U.end_ellipsis(url, max(8, width - 19)) + " (/open)",
+                            "info"))
+            else:
+                out.append(("   open    server stopped (was "
+                            + U.end_ellipsis(url, max(8, width - 35)) + ")",
+                            "dim"))
         if status == "partial":
             out.append((f"   next    /resume to continue {sym('sep')} /why",
                         "dim"))
@@ -1412,6 +1417,8 @@ class App:
         summary = str(rep.get("summary") or "")
         if aid in ("", "a0", "None"):
             self.last_report = rep
+            if rep.get("served_url"):
+                self.last_url = str(rep.get("served_url") or "")
             self._report_seen = True
             self._reported_agents.add("a0")
             self.phase = status
@@ -1428,7 +1435,12 @@ class App:
                 "issues": rep.get("open_issues") or [],
                 "open_issues": rep.get("open_issues") or [],
                 "verify": dict(self.last_verify or {}),
-                "open_url": self.last_url or "",
+                "served_url": str(rep.get("served_url") or ""),
+                "served_alive": bool(rep.get("served_alive")),
+                "served_probe_at": str(rep.get("served_probe_at") or ""),
+                "served_requested": bool(rep.get("served_requested")),
+                "open_url": (str(rep.get("served_url") or "")
+                             if rep.get("served_alive") else ""),
                 "file_stats": self._file_stats(),
                 "why": (str(rep.get("summary") or "").strip()
                         if status == "failed" else ""),
@@ -3090,7 +3102,17 @@ class App:
             self.add_notice("compacted" if ok else "nothing to compact yet")
             return
         if cmd == "/open":
-            url = arg.strip() or self.last_url
+            rep = self.last_report if isinstance(self.last_report, dict) else {}
+            served = str(rep.get("served_url") or "")
+            if not arg.strip() and served:
+                if not rep.get("served_alive"):
+                    self.add_notice(
+                        f"server stopped at finish (was {served}); not opening",
+                        "warn")
+                    return
+                url = served
+            else:
+                url = arg.strip() or self.last_url
             if not url:
                 self.add_notice("no link to open yet")
                 return

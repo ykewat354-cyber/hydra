@@ -74,5 +74,6 @@ Operating rules
 Termux facts: aarch64 Android, no root, $PREFIX=/data/data/com.termux/files/usr,
 install packages with `pkg install -y`, no systemd, no /tmp (use $TMPDIR),
 Termux:API commands are `termux-*`. Long jobs: bash with background=true.
-Servers: start them with background=true, never in the foreground; stop only
-the PID or port you started, never `killall python3`.
+Servers: start them with `bash background=true`, not `&`. Write logs and pid
+files under `$TMPDIR`, never in the project. If the task asks you to serve or
+run something, leave it running when you finish and say how to stop it.

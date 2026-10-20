@@ -189,6 +189,51 @@ class HonestyTests(unittest.TestCase):
         self.assertIn("✗ Failed", text)
         self.assertIn("401 invalid key", text)
 
+    def test_dead_server_card_is_not_openable(self):
+        app = self._app()
+        app.event({"type": "run_start", "run": "r_t", "task": "serve the site",
+                   "cwd": ".", "ts": time.time()})
+        app.event({"type": "report", "agent": "a0", "report": {
+            "status": "partial", "summary": "served it",
+            "files_changed": [],
+            "served_url": "http://127.0.0.1:8080/",
+            "served_alive": False, "served_probe_at": "start",
+            "served_requested": True,
+            "open_issues": ["server not running at finish"]}})
+        app.drain()
+        text = "\n".join(app.render(80, 40))
+        self.assertIn("server stopped (was http://127.0.0.1:8080/)", text)
+        self.assertNotIn("(/open)", text)
+        app.handle_command("/open")
+        self.assertIn("server stopped at finish", app.blocks[-1].text)
+
+    def test_live_server_card_has_open(self):
+        app = self._app()
+        app.event({"type": "run_start", "run": "r_t", "task": "serve the site",
+                   "cwd": ".", "ts": time.time()})
+        app.event({"type": "report", "agent": "a0", "report": {
+            "status": "done", "summary": "served it", "files_changed": [],
+            "served_url": "http://127.0.0.1:8080/",
+            "served_alive": True, "served_probe_at": "finish",
+            "served_requested": True}})
+        app.drain()
+        text = "\n".join(app.render(80, 40))
+        self.assertIn("open    http://127.0.0.1:8080/ (/open)", text)
+
+    def test_no_serving_request_has_no_open_row(self):
+        app = self._app()
+        app.event({"type": "run_start", "run": "r_t", "task": "summarise",
+                   "cwd": ".", "ts": time.time()})
+        app.event({"type": "report", "agent": "a0", "report": {
+            "status": "done", "summary": "done", "files_changed": [],
+            "served_url": "http://127.0.0.1:8080/",
+            "served_alive": True, "served_probe_at": "finish",
+            "served_requested": False}})
+        app.drain()
+        text = "\n".join(app.render(80, 40))
+        self.assertNotIn("open    ", text)
+        self.assertNotIn("(/open)", text)
+
     def test_file_diffstats_come_from_real_tools(self):
         app = self._app()
         app.event({"type": "run_start", "run": "r_t", "task": "x",
