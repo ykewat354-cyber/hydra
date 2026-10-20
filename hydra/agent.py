@@ -588,45 +588,50 @@ class Agent:
         self.set_report("done", str(text or "").strip()[:2000])
 
     def _written_files(self) -> list:
-        """Exact tool writes plus files modified through shell/other tools."""
-        files = [str(x) for x in (self.data.get("files_written") or [])]
-        try:
-            from .project import recent_writes
-            since = float(getattr(self, "started_at", 0) or 0) - 2.0
-            for p in recent_writes(self.workdir, since, limit=40):
-                if p not in files:
-                    files.append(p)
-        except Exception:
-            pass
-        return files
+        """Exact tool writes (shell writes are found by the root scan)."""
+        return [str(x) for x in (self.data.get("files_written") or [])]
 
     def set_report(self, status: str, summary: str, *, files_changed=None,
                    commands_run=None, findings=None, open_issues=None, artifacts=None) -> None:
-        files = [str(x) for x in (files_changed or [])]
-        if not files:
-            # A cap/kill/partial report is still a report: never claim no files
-            # after real writes (including shell heredocs the tools cannot see).
-            files = self._written_files()
+        explicit = [str(x) for x in (files_changed or [])]
+        try:
+            from . import artifacts as A
+            scanned = A.collect(self, explicit)
+        except Exception:
+            scanned = {"files": None, "method": "scan", "complete": False,
+                       "reason": "scan-error"}
         self.report = {
             "status": status if status in ("done", "partial", "failed", "killed") else "done",
             "summary": str(summary or ""),
-            "files_changed": files,
+            "files_changed": scanned.get("files"),
+            "files_changed_method": scanned.get("method") or "scan",
+            "scan_complete": bool(scanned.get("complete")),
             "commands_run": [str(x) for x in (commands_run or [])],
             "findings": [str(x) for x in (findings or [])],
             "open_issues": [str(x) for x in (open_issues or [])],
             "artifacts": [str(x) for x in (artifacts or [])],
         }
+        if not self.report["scan_complete"] and scanned.get("reason"):
+            self.report["scan_note"] = str(scanned["reason"])[:120]
         self.finished = True
 
     def report_out(self) -> dict:
         rep = self.report or {"status": "failed", "summary": "agent ended without finish",
-                              "files_changed": [], "commands_run": [], "findings": [],
+                              "commands_run": [], "findings": [],
                               "open_issues": [], "artifacts": []}
-        if not rep.get("files_changed"):
-            written = self._written_files()
-            if written:
+        if "files_changed" not in rep:
+            # A kill before finish: scan once, but keep the same honesty rule.
+            try:
+                from . import artifacts as A
+                res = A.collect(self, [])
                 rep = dict(rep)
-                rep["files_changed"] = written
+                rep["files_changed"] = res.get("files")
+                rep["files_changed_method"] = res.get("method") or "scan"
+                rep["scan_complete"] = bool(res.get("complete"))
+            except Exception:
+                rep = dict(rep)
+                rep["files_changed"] = None
+                rep["scan_complete"] = False
         return rep
 
     # -------------------------------------------------- stall detection

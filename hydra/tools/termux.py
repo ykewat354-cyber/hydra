@@ -91,11 +91,50 @@ def _tool_wifi(args, ctx):
     return _run(["termux-wifi-connectioninfo"])
 
 
+_ACTIONS = {
+    "notify": _tool_notify, "toast": _tool_toast,
+    "clipboard_get": _tool_clipboard_get, "clipboard_set": _tool_clipboard_set,
+    "battery": _tool_battery, "location": _tool_location, "tts": _tool_tts,
+    "vibrate": _tool_vibrate, "open_url": _tool_open_url, "share": _tool_share,
+    "sms_send": _tool_sms, "call": _tool_call, "camera_photo": _tool_camera,
+    "wifi": _tool_wifi,
+}
+
+
+def _tool_termux(args, ctx):
+    """One schema for every Android action (B2 prompt footprint)."""
+    action = str((args or {}).get("action") or "").strip().lower()
+    fn = _ACTIONS.get(action)
+    if fn is None:
+        return ("ERROR: unknown termux action; use one of: "
+                + ", ".join(sorted(_ACTIONS)))
+    return fn(args, ctx)
+
+
 def register(reg) -> None:
+    reg.register(Tool(
+        "termux",
+        "Android actions: notify, toast, clipboard, battery, location, tts, "
+        "vibrate, open_url, share, sms_send, call, camera_photo, wifi.",
+        {"type": "object",
+         "properties": {
+             "action": {"type": "string", "enum": sorted(_ACTIONS)},
+             "title": {"type": "string"},
+             "content": {"type": "string"},
+             "text": {"type": "string"},
+             "provider": {"type": "string"},
+             "ms": {"type": "integer"},
+             "url": {"type": "string"},
+             "path": {"type": "string"},
+             "number": {"type": "string"},
+         },
+         "required": ["action"]},
+        _tool_termux))
+    # Keep the old names dispatchable, but out of the model's prompt.
     reg.register(Tool("termux_notify", "Android notification.",
                       {"type": "object", "properties": {"title": {"type": "string"},
                                                         "content": {"type": "string"}}},
-                      _tool_notify))
+                      _tool_notify, hide_schema=True))
     reg.register(Tool("termux_toast", "Android toast message.",
                       {"type": "object", "properties": {"text": {"type": "string"}},
                        "required": ["text"]}, _tool_toast))
@@ -108,13 +147,13 @@ def register(reg) -> None:
                       {"type": "object", "properties": {}}, _tool_battery))
     reg.register(Tool("termux_location", "Device location as JSON.",
                       {"type": "object", "properties": {"provider": {"type": "string"}}},
-                      _tool_location))
+                      _tool_location, hide_schema=True))
     reg.register(Tool("termux_tts", "Speak text out loud.",
                       {"type": "object", "properties": {"text": {"type": "string"}},
                        "required": ["text"]}, _tool_tts))
     reg.register(Tool("termux_vibrate", "Vibrate the phone.",
                       {"type": "object", "properties": {"ms": {"type": "integer"}}},
-                      _tool_vibrate))
+                      _tool_vibrate, hide_schema=True))
     reg.register(Tool("termux_open_url", "Open a URL in the default app/browser.",
                       {"type": "object", "properties": {"url": {"type": "string"}},
                        "required": ["url"]}, _tool_open_url))
@@ -130,6 +169,9 @@ def register(reg) -> None:
                        "required": ["number"]}, _tool_call))
     reg.register(Tool("termux_camera_photo", "Take a photo with the rear camera.",
                       {"type": "object", "properties": {"path": {"type": "string"}}},
-                      _tool_camera))
+                      _tool_camera, hide_schema=True))
     reg.register(Tool("termux_wifi", "Wi-Fi connection info as JSON.",
                       {"type": "object", "properties": {}}, _tool_wifi))
+    for t in reg.tools.values():
+        if t.name.startswith("termux_") and t.name != "termux":
+            t.hide_schema = True

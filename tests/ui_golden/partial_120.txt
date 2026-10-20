@@ -6,7 +6,7 @@
                                                                                          │                              
 ! turn cap reached (30) — finishing as partial                                           │RUN                           
                                                                                          │r_demo_1405                   
- ● Partial                                                     30 turns · 3m 49s · $0.014│30 turns · $0.0140            
+ ● Partial                                                     30 turns · 3m 49s · $0.014│30 turns · $0.014             
    files   js/script.js +2                                                               │nemotron-3-super              
    verify  ✗ no HTTP 200 evidence for the page                                           │                              
    next    /resume to continue · /why                                                    │                              

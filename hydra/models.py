@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -95,7 +96,9 @@ class ModelRegistry:
         e = self.entry(model)
         if not e or e.get("status") != "ok":
             return True  # unknown models are allowed, ranked last
-        return bool(e.get("tools", True))
+        if e.get("tools") is None:
+            return True  # probe did not answer: unknown, not "no"
+        return bool(e.get("tools"))
 
     def is_json_capable(self, model: str) -> bool:
         e = self.entry(model)
@@ -122,7 +125,8 @@ class ModelRegistry:
         e["status"] = status
         e["checked_at"] = time.time()
         if status in ("paid", "missing"):
-            e["recheck_at"] = time.time() + 86400
+            # C2: retry before the next use after >=60s, not next day.
+            e["recheck_at"] = time.time() + 60
         e.update(extra)
         self.save()
 
@@ -143,6 +147,24 @@ class ModelRegistry:
     def json_class_of(self, model: str) -> str:
         cls = self.entry(model).get("json_class")
         return cls if cls in ("strict", "tolerant", "no") else "unknown"
+
+    def set_json_prompt_class(self, model: str, json_class: str,
+                              **extra) -> None:
+        """C3: prompted JSON-only matrix (with and without ``format``)."""
+        e = self.data.setdefault("models", {}).setdefault(model, {})
+        e["json_prompt_class"] = json_class
+        e["json_prompt_checked_at"] = time.time()
+        e.update(extra)
+        self.save()
+
+    def json_prompt_class_of(self, model: str) -> str:
+        cls = self.entry(model).get("json_prompt_class")
+        return cls if cls in ("strict", "tolerant", "no") else "unknown"
+
+    def routing_json_class_of(self, model: str) -> str:
+        """F1 prefers the C3 prompted measurement; T07 is the fallback."""
+        cls = self.json_prompt_class_of(model)
+        return cls if cls != "unknown" else self.json_class_of(model)
 
     def save(self) -> None:
         self.data["updated"] = time.time()
@@ -171,7 +193,9 @@ def detect_think(client, gate, model: str) -> str:
 
 
 def probe_one(client, gate, model: str) -> dict:
-    res = {"status": "unknown", "tools": False, "json": False,
+    # None = unknown (probe failed); False = the model answered without a
+    # tool call.  Never turn a failed probe into a capability claim (C1).
+    res = {"status": "unknown", "tools": None, "json": False,
            "think_style": "bool", "ms": 0}
     t0 = time.time()
     try:
@@ -195,27 +219,32 @@ def probe_one(client, gate, model: str) -> dict:
     res["ms"] = int((time.time() - t0) * 1000)
 
     # tool calling: native tool_calls first, then the same tolerant text
-    # parser the loop uses.  Without the second half the registry wrongly
-    # marks models that emit JSON/<tool_call> blocks (gpt-oss:120b) as
-    # tool-incapable and the router prunes them.
-    try:
-        with gate.slot(0):
-            r = client.chat(model, TOOL_MSG, tools=[ADD_TOOL],
-                            options={"num_predict": 64})
-        candidates = list(r.tool_calls or [])
-        if not candidates:
-            try:
-                from .agent import parse_text_calls
-                candidates = parse_text_calls(r.content or "")
-            except Exception:
-                candidates = []
-        for tc in candidates:
-            fn = (tc.get("function") or {})
-            if fn.get("name") == "add":
-                res["tools"] = True
+    # parser the loop uses.  Retry once: a model may emit the call on the
+    # second try.  A failed probe stays unknown (None), never "no" (C1).
+    res["tools"] = None
+    for _attempt in range(2):
+        try:
+            with gate.slot(0):
+                r = client.chat(model, TOOL_MSG, tools=[ADD_TOOL],
+                                options={"num_predict": 64})
+            candidates = list(r.tool_calls or [])
+            if not candidates:
+                try:
+                    from .agent import parse_text_calls
+                    candidates = parse_text_calls(r.content or "")
+                except Exception:
+                    candidates = []
+            res["tools"] = False
+            for tc in candidates:
+                fn = (tc.get("function") or {})
+                if fn.get("name") == "add":
+                    res["tools"] = True
+                    break
+            if res["tools"]:
                 break
-    except Exception:
-        pass
+        except Exception:
+            res["tools"] = None
+            continue
 
     # json output
     try:
@@ -266,6 +295,81 @@ def probe_all(cfg: dict, client, gate, registry: ModelRegistry,
     return out
 
 
+# ------------------------------------------------------ auto re-probe (C2)
+_REPROBE_LOCK = threading.Lock()
+REPROBE_GAP_S = 3600.0
+
+
+def maybe_reprobe(cfg: dict, client, gate, registry, journal=None,
+                  needed=None, force: bool = False) -> list:
+    """Probe stale, already-known models once per hour, never every turn.
+
+    A fresh install (empty models.json) is not probed implicitly: that is the
+    explicit `hydra models probe` path.  Only entries whose checked_at is
+    older than models.reprobe_days are refreshed, serial through the gate.
+    """
+    if not registry or not registry.data.get("models"):
+        return []
+    if not str(getattr(client, "key", "") or ""):
+        return []
+    days = float(C.get(cfg, "models.reprobe_days", 7) or 7)
+    now = time.time()
+    marker = C.home() / "models.reprobe"
+    if not force:
+        try:
+            last = float(marker.read_text(encoding="utf-8").strip() or 0)
+        except Exception:
+            last = 0.0
+        if now - last < REPROBE_GAP_S:
+            return []
+    names = list(needed or [])
+    if not names:
+        for role in ("lead", "worker", "coder", "researcher", "reviewer",
+                     "verifier", "critic", "summarizer", "planner", "debugger",
+                     "tester", "scribe", "vision"):
+            chain = list(C.get(cfg, f"roles.{role}.chain") or [])
+            if chain and str(chain[0]) not in names:
+                names.append(str(chain[0]))
+    todo = []
+    for name in names:
+        e = registry.entry(name)
+        checked = float(e.get("checked_at") or 0)
+        if checked and (now - checked) > days * 86400:
+            todo.append(name)
+    cap = int(C.get(cfg, "models.auto_reprobe_max", 2) or 2)
+    todo = todo[:max(0, cap)]
+    if not todo:
+        return []
+    with _REPROBE_LOCK:
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(now), encoding="utf-8")
+        except Exception:
+            pass
+        done = []
+        for name in todo:
+            old = registry.entry(name)
+            try:
+                res = probe_one(client, gate, name)
+                registry.mark(name, res.get("status", "unknown"),
+                              tools=res.get("tools"), json=res.get("json"),
+                              think_style=res.get("think_style"),
+                              ms=res.get("ms"))
+                done.append(name)
+            except AuthError:
+                break
+            except Exception:
+                continue
+        if journal is not None:
+            try:
+                journal.event("reprobe", None, models=done, ok=bool(done),
+                              old={n: registry.entry(n).get("status")
+                                   for n in todo})
+            except Exception:
+                pass
+        return done
+
+
 # ------------------------------------------------------ CLI
 
 def cli(cfg: dict, args: list) -> int:
@@ -273,22 +377,24 @@ def cli(cfg: dict, args: list) -> int:
     if sub == "probe":
         return _cmd_probe(cfg, args[1:])
     if sub in ("ls", "list"):
-        return _cmd_ls(cfg)
+        return _cmd_ls(cfg, args[1:])
     if sub == "pin":
         return _cmd_pin(cfg, args[1:])
     if sub in ("bench", "tune"):
         from . import bench
         return (bench.cli_bench(cfg, args[1:]) if sub == "bench"
                 else bench.cli_tune(cfg, args[1:]))
-    print("usage: hydra models probe [--all] | ls | pin MODEL [--role ROLE] "
+    print("usage: hydra models probe [--all] | ls [--roles] | pin MODEL [--role ROLE] "
           "| bench [--models a,b] [--tasks B1,B2,B3] [--runs 1] [--max-usd 0.12] "
           "| tune [--apply]")
     return 2
 
 
 def _line(name: str, res: dict) -> str:
+    tools = {True: "y", False: "n", None: "?"}.get(res.get("tools"), "?") if \
+        "tools" in res else "?"
     return (f"  {name:<22} {res.get('status', '?'):<7} "
-            f"tools={'y' if res.get('tools') else 'n'} "
+            f"tools={tools} "
             f"json={'y' if res.get('json') else 'n'} "
             f"think={res.get('think_style', '?')} {res.get('ms', 0)}ms")
 
@@ -324,16 +430,64 @@ def _cmd_probe(cfg: dict, args: list) -> int:
     return 0 if results else 1
 
 
-def _cmd_ls(cfg: dict) -> int:
+def _tool_flag(e: dict) -> str:
+    return {True: "y", False: "n", None: "?"}.get(e.get("tools"), "?")
+
+
+def _cmd_ls(cfg: dict, args: list = None) -> int:
     reg = ModelRegistry(cfg)
     if not reg.data.get("models"):
         print("no models.json yet - run: hydra models probe")
+        return 0
+    if args and "--roles" in args:
+        roles = ("lead", "worker", "coder", "researcher", "reviewer",
+                 "verifier", "critic", "summarizer", "planner", "debugger",
+                 "tester", "scribe", "vision")
+        for role in roles:
+            chain = [str(m) for m in (C.get(cfg, f"roles.{role}.chain") or [])]
+            if not chain:
+                continue
+            effective, dropped = [], []
+            for name in chain:
+                e = reg.entry(name)
+                status = reg.status_of(name)
+                if status in ("paid", "missing"):
+                    dropped.append((name, status))
+                    continue
+                if (status == "ok" and role in ("lead", "coder", "worker",
+                                                "debugger", "tester")
+                        and not reg.is_tool_capable(name)):
+                    dropped.append((name, "tools=no"))
+                    continue
+                effective.append((name, e, status))
+            print(f"[{role}]")
+            print(" effective: " + (" -> ".join(n for n, _, _ in effective)
+                                    or "(none)"))
+            for i, (name, e, status) in enumerate(effective):
+                checked = e.get("checked_at") or 0
+                when = time.strftime("%m-%d %H:%M",
+                                     time.localtime(checked)) if checked \
+                    else "never"
+                active = " *" if i == 0 else "  "
+                print(f" {active} {name:<22} {status:<7} "
+                      f"tools={_tool_flag(e)} "
+                      f"json={e.get('json_prompt_class') or e.get('json_class') or '?'} "
+                      f"think={e.get('think_style', '?')} checked={when}")
+            for name, why in dropped:
+                print(f"   - {name:<22} dropped: {why}")
+        lead = [str(m) for m in (C.get(cfg, "roles.lead.chain") or [])]
+        lead_eff = [m for m in lead if reg.status_of(m) not in ("paid", "missing")]
+        lead_eff = [m for m in lead_eff if reg.is_tool_capable(m)] or lead_eff
+        print("default lead: " + (lead_eff[0] if lead_eff else "(none)") +
+              " (first effective lead-chain model)")
+        if reg.needs_reprobe():
+            print("(stale: run `hydra models probe`)")
         return 0
     for e in reg.list_all():
         checked = time.strftime("%m-%d %H:%M",
                                 time.localtime(e.get("checked_at") or 0))
         print(f"{e['model']:<22} {e['status_now']:<7} "
-              f"tools={'y' if e.get('tools') else '?'} "
+              f"tools={_tool_flag(e)} "
               f"json={'y' if e.get('json') else '?'} "
               f"think={e.get('think_style', '?')} checked={checked}")
     if reg.needs_reprobe():

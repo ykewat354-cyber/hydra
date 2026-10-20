@@ -165,7 +165,9 @@ def _tool_agent_result(args, ctx):
         return "ERROR: swarm is not available in this runtime"
     if not args.get("id"):
         return "ERROR: id is required"
-    return swarm.format_report(str(args["id"]))
+    aid = str(args["id"])
+    swarm.merge_child(ctx.agent, aid)
+    return swarm.format_report(aid)
 
 
 # ------------------------------------------------------ skills (§19.2)

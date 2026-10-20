@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import os
+import re
 import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -184,8 +186,93 @@ def _tool_bash(args, ctx) -> str:
     return run_shell(ctx.rt, cwd, cmd, timeout, stdin_text=args.get("stdin"))
 
 
+_PORT_PATTERNS = (
+    re.compile(r"(?:--port[= ]|-p\s+|http\.server\s+|--bind[= ][^\s]*:|:)(\d{2,5})\b"),
+    re.compile(r"\bPORT=(\d{2,5})\b"),
+)
+_SERVER_WORDS = ("server", "serve", "http.server", "uvicorn", "gunicorn",
+                 "flask", "vite", "npm", "node", "django", "runserver",
+                 "streamlit", "gradio")
+
+
+def _server_port(cmd: str):
+    """(port, start, end) for a likely server command, else None."""
+    low = cmd.lower()
+    if not any(w in low for w in _SERVER_WORDS):
+        return None
+    for rx in _PORT_PATTERNS:
+        m = rx.search(cmd)
+        if not m:
+            continue
+        try:
+            port = int(m.group(1))
+        except Exception:
+            continue
+        if 1 <= port <= 65535:
+            return port, m.start(1), m.end(1)
+    return None
+
+
+def _port_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def _free_port_after(port: int):
+    for cand in range(int(port) + 1, min(65535, int(port) + 51)):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", cand))
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def _job_alive(job) -> bool:
+    try:
+        return job.get("proc") is not None and job["proc"].poll() is None
+    except Exception:
+        return False
+
+
 def _background(ctx, cwd: Path, cmd: str) -> str:
     rt = ctx.rt
+    port = None
+    note = ""
+    found = _server_port(cmd)
+    if found:
+        port, start, end = found
+        ours = [(j, m) for j, m in (getattr(rt, "jobs", {}) or {}).items()
+                if m.get("port") == port and _job_alive(m)
+                and str(m.get("cwd") or "") == str(cwd)]
+        nudged = getattr(rt, "server_nudged", None)
+        if not isinstance(nudged, set):
+            nudged = set()
+            rt.server_nudged = nudged
+        if ours:
+            jid0, meta0 = ours[0]
+            key = (str(cwd), port)
+            first = key not in nudged
+            nudged.add(key)
+            head = "NUDGE" if first else "already serving"
+            return (f"{head}: {jid0} is already serving this project on port "
+                    f"{port} (log: {meta0.get('log')}). Reuse that job instead "
+                    f"of starting a second server. A second process would shadow "
+                    f"the first and make the report ambiguous.")
+        if _port_open(port):
+            free = _free_port_after(port)
+            if free is None:
+                return (f"ERROR: port {port} is already in use and no free port "
+                        f"was found nearby; pick a free port and state it.")
+            cmd = cmd[:start] + str(free) + cmd[end:]
+            note = (f"\nNOTE: port {port} was already in use by another process; "
+                    f"started on port {free} instead "
+                    f"(http://127.0.0.1:{free}/). State this port in your report.")
+            port = free
     jid = rt.next_job_id()
     logdir = (rt.journal.dir / "jobs") if rt.journal else (Path(tempfile.gettempdir()) / "hydra-jobs")
     logdir.mkdir(parents=True, exist_ok=True)
@@ -206,14 +293,19 @@ def _background(ctx, cwd: Path, cmd: str) -> str:
             except Exception:
                 pass
     meta = {"proc": proc, "log": log, "cmd": cmd, "started": time.time(),
-            "agent": ctx.agent.id}
+            "agent": ctx.agent.id, "cwd": str(cwd), "port": port,
+            "url": f"http://127.0.0.1:{port}/" if port else ""}
     rt.jobs[jid] = meta
     if rt.journal is not None:
         # Persist enough to re-attach after a crash: the job outlives us
         # (start_new_session) but the in-memory Popen handle does not.
         rt.journal.event("job_start", ctx.agent.id, jid=jid, pid=proc.pid,
-                         cmd=cmd, log=str(log), started=meta["started"])
-    return f"started job {jid} (pid {proc.pid}); log: {log}"
+                         cmd=cmd, log=str(log), started=meta["started"],
+                         port=port, url=meta["url"])
+    started = f"started job {jid} (pid {proc.pid}); log: {log}"
+    if meta["url"]:
+        started += f"; url: {meta['url']}"
+    return started + note
 
 
 def _tool_python(args, ctx) -> str:
@@ -252,7 +344,9 @@ def _tool_job_status(args, ctx) -> str:
             continue
         rc = job["proc"].poll()
         state = "running" if rc is None else f"exited({rc})"
-        lines.append(f"{jid}: {state} pid={job['proc'].pid} cmd={job['cmd'][:100]}")
+        extra = f" port={job['port']} url={job.get('url')}" if job.get("port") else ""
+        lines.append(f"{jid}: {state} pid={job['proc'].pid}{extra} "
+                     f"cmd={job['cmd'][:100]}")
     return "\n".join(lines)
 
 

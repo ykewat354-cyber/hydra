@@ -7,7 +7,7 @@
    └ +8 lines                                                                            │                              
                                                                                          │RUN                           
 Added subtract(a, b) to calc.py and ran the tests.                                       │r_demo_1405                   
-                                                                                         │6 turns · $0.0040             
+                                                                                         │6 turns · $0.004              
  ✓ Done                                                            6 turns · 14s · $0.004│nemotron-3-super              
    files   calc.py +4  test_calc.py +8                                                   │                              
    verify  pass · tests ran 3/3                                                          │                              

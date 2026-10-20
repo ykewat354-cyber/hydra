@@ -117,6 +117,7 @@ class Runtime:
         self.executor = Executor(self)
         self.agents: dict = {}
         self.jobs: dict = {}
+        self.server_nudged: set = set()
         self.swarm = Swarm(self)
         self._agent_seq = 0
         self._job_seq = 0
@@ -270,6 +271,17 @@ class Runtime:
         agent.runtime = self
         return agent
 
+    def _files_marker(self, since: float) -> Path:
+        """A run-start marker for `find -newer`; never reset on resume."""
+        marker = Path(self.journal.dir) / "files.marker"
+        if not marker.exists():
+            try:
+                marker.write_text("", encoding="utf-8")
+                os.utime(marker, (float(since) - 1.0, float(since) - 1.0))
+            except Exception:
+                pass
+        return marker
+
     def start_run(self, task: str, name: str = None, lead_model: str = None) -> Agent:
         with self.web_cache_lock:
             self.web_cache.clear()
@@ -279,8 +291,20 @@ class Runtime:
         self._flush_pending_niceties()
         self._attach_http_log()
         self.router.journal = self.journal
+        # C2: refresh stale registry entries once per process/hour, never per
+        # turn.  A fresh/empty registry is left to explicit `models probe`.
+        if not getattr(self, "_reprobe_checked", False):
+            self._reprobe_checked = True
+            try:
+                from . import models as M
+                self.reprobed = M.maybe_reprobe(
+                    self.cfg, self.client, self.gate, self.registry,
+                    journal=self.journal)
+            except Exception:
+                self.reprobed = []
         self.env_block = build_env_block(self.cwd, self.cfg, role="lead",
                                          caps=self.caps)
+        marker = self._files_marker(time.time())
         if lead_model:
             chain = list(C.get(self.cfg, "roles.lead.chain") or [])
             self.cfg.setdefault("roles", {}).setdefault("lead", {})["chain"] = \
@@ -288,6 +312,7 @@ class Runtime:
         lead = Agent("a0", "lead", task, self.cfg, workdir=self.cwd,
                      system_prompt=load_system_prompt("lead"),
                      env_block=self.env_block)
+        lead.data["files_marker"] = str(marker)
         if lead_model:
             # Make --lead a real hint: router fallback ranking sorts unknown
             # models last, so without this a bad lead is never attempted (and
@@ -328,6 +353,8 @@ class Runtime:
         lead = Agent("a0", "lead", data.get("task", ""), self.cfg, workdir=self.cwd,
                      system_prompt=load_system_prompt("lead"),
                      env_block=self.env_block)
+        lead.data["files_marker"] = str(
+            self._files_marker(float(data.get("started") or time.time())))
         self._setup_agent(lead)
         msgs = [r for r in self.journal.read_transcript("a0")
                 if isinstance(r, dict) and r.get("role")]

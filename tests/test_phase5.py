@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import time
 import unittest
+from pathlib import Path
 
 from tests.test_phase1 import Base
 from tests.test_phase2 import finish_node
@@ -146,6 +147,7 @@ class VerifierTests(Base):
                      {"content": '{"verdict": "fail", "issues": '
                                  '[{"what": "x.py does not exist", "fix": "create it"}]}'},
                      {"content": '{"verdict": "pass", "issues": []}'})
+        (Path(self.cwd.name) / "x.py").write_text("x = 1\n")
         rt = Runtime(self.cfg(), cwd=self.cwd.name, quiet=True)
         try:
             code, report = rt.run("verify me")

@@ -7,7 +7,7 @@
 ! turn cap reached (30) — finishing 
   as partial                        
                                     
- ● Partial                          
+ ● Partial                    $0.014
    files   js/script.js +2          
    verify  ✗ no HTTP 200 evidence … 
    next    /resume to continue · /wh
@@ -28,4 +28,4 @@
 ╭──────────────────────────────────╮
 │ ❯ Ask HYDRA to build, fix, debug │
 ╰──────────────────────────────────╯
- / commands · @ files · ! shell     
+ / commands         ctx 31% · $0.014

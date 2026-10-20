@@ -36,7 +36,8 @@ class Router:
         self.registry = registry
         self.sleep = time.sleep
         self._lock = threading.Lock()
-        self._breakers = {}   # model -> {"fails": int, "open_until": ts, "cooldown": sec}
+        self._breakers = {}
+        self._reprobe_last = {}   # model -> {"fails": int, "open_until": ts, "cooldown": sec}
         self._base_cooldown = float(C.get(cfg, "routing.breaker_cooldown", 300) or 300)
         self._breaker_fails = int(C.get(cfg, "routing.breaker_fails", 3) or 3)
         self._retries = max(1, int(C.get(cfg, "api.retries", 5) or 5))
@@ -197,10 +198,55 @@ class Router:
     def _is_empty(reply) -> bool:
         return not (reply.content.strip() or reply.tool_calls or reply.thinking.strip())
 
+    def _note_tools(self, model: str, reply) -> None:
+        """C1: a successful native call is evidence, even before a probe."""
+        if self.registry is None or not getattr(reply, "tool_calls", None):
+            return
+        try:
+            e = self.registry.entry(model)
+            if e.get("tools") is True:
+                return
+            self.registry.mark(model, "ok", tools=True,
+                               tools_source="observed")
+            self._event("tools_observed", None, model=model,
+                        source="observed")
+        except Exception:
+            pass
+
+    def _reprobe_due(self, chain: list) -> None:
+        """C2: 402/404 marks are retried before the next use, >=60s apart."""
+        reg = self.registry
+        if reg is None:
+            return
+        now = time.time()
+        for model in chain:
+            e = reg.entry(model)
+            if e.get("status") not in ("paid", "missing"):
+                continue
+            due = float(e.get("recheck_at") or 0)
+            if due and now < due:
+                continue
+            if now - float(self._reprobe_last.get(model) or 0) < 60:
+                continue
+            self._reprobe_last[model] = now
+            old = e.get("status")
+            try:
+                from .models import probe_one
+                res = probe_one(self.client, self.gate, model)
+                reg.mark(model, res.get("status", "unknown"),
+                         tools=res.get("tools"), json=res.get("json"),
+                         think_style=res.get("think_style"),
+                         ms=res.get("ms"))
+                self._event("reprobe", None, model=model, old=old,
+                            new=res.get("status"), reason="402/404")
+            except Exception:
+                continue
+
     # ------------------------------------------------------------ chat
     def chat(self, messages: list, role: str = "lead", tools=None, think=None,
              agent=None, exclude=(), mode=None, on_delta=None,
-             model: str = None, format=None, chain_override=None) -> "client.Reply":
+             model: str = None, format=None, chain_override=None,
+             usage_role: str = None) -> "client.Reply":
         hint = model or (getattr(agent, "model_override", None)
                          if agent is not None else None)
         if tools:
@@ -213,6 +259,10 @@ class Router:
                 if filtered:
                     chain = filtered
         else:
+            raw = self._raw_chain(role)
+            if hint and hint not in raw:
+                raw = [hint] + raw
+            self._reprobe_due(raw)
             chain = self.chain_for(role, exclude, need_tools=bool(tools),
                                    model_hint=hint, need_json=bool(format))
         errors = []
@@ -253,7 +303,8 @@ class Router:
                         if not empty:
                             self._breaker_ok(model)
                             self._mark(model, "ok")
-                            self._ledger(agent, role, model, reply)
+                            self._note_tools(model, reply)
+                            self._ledger(agent, usage_role or role, model, reply)
                     if empty:
                         if attempt == 1:
                             messages = list(messages) + [{

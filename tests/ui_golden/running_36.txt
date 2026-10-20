@@ -24,7 +24,7 @@
                                     
                                     
                                     
-▖ Verifying…  13s · ↓ 2.1k tok      
+▖ Verifying…  13s        esc to stop
 ╭──────────────────────────────────╮
 │ ❯ steer this run · esc stops     │
 ╰──────────────────────────────────╯

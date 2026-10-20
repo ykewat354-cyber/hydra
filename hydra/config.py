@@ -59,6 +59,7 @@ DEFAULTS: dict = {
         "researcher": {"chain": ["nemotron-3-super", "gemma4:31b", "gpt-oss:20b"], "think": "low"},
         "critic":     {"chain": ["nemotron-3-ultra", "gemma4:31b", "gpt-oss:120b"], "think": "medium"},
         "reviewer":   {"chain": ["nemotron-3-ultra", "gemma4:31b", "gpt-oss:120b"], "think": "medium"},
+        "verifier":   {"chain": ["nemotron-3-ultra", "gemma4:31b", "gpt-oss:120b"], "think": "low"},
         "summarizer": {"chain": ["nemotron-3-super", "gemma4:31b", "gpt-oss:20b"], "think": "off"},
         "vision":     {"chain": ["gemma4:31b"], "think": "low"},
         "planner":    {"chain": ["gpt-oss:120b", "nemotron-3-ultra", "gemma4:31b"], "think": "medium"},
@@ -67,9 +68,15 @@ DEFAULTS: dict = {
         "scribe":     {"chain": ["nemotron-3-super", "gemma4:31b", "gpt-oss:20b"], "think": "low"},
     },
     "journal": {"fsync": "turn", "git_snapshots": False},
+    "verification": {
+        "max_tool_calls": 5,      # verifier is tool-less; reads are not calls
+        "budget_s": 60,           # wall clock for one verification round
+        "max_usd": 0.01,          # per whole run (all verify rounds)
+    },
     "models": {
         "probe_candidates": [],   # empty -> CANDIDATE_MODELS (the pricing table)
         "reprobe_days": 7,
+        "auto_reprobe_max": 2,    # per hour, first model of each role only
     },
     "termux": {"wake_lock": True, "notify_on_finish": True, "notify_on_park": True},
     "ui": {
@@ -95,6 +102,10 @@ DEFAULTS: dict = {
         "workspace_projects": 5,
         "workspace_recent": 6,
         "recent_runs": 3,         # same-cwd run summaries; 0 = off
+    },
+    "report": {
+        "scan_budget_ms": 1000,   # file-change scan deadline; timeout -> null
+        "scan_max_entries": 50000,
     },
     "autoverify": {
         "enabled": True,

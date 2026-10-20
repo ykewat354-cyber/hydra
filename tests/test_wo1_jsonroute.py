@@ -101,6 +101,20 @@ class JsonRouteUnitTests(unittest.TestCase):
         return Router(cfg, client, prices or PRICES, registry=reg)
 
     # ------------------------------------------------------------ candidates
+    def test_prompt_matrix_class_drives_f1(self):
+        # C3: a prompted JSON-only measurement (json_prompt_class) wins over
+        # the old T07 format-parameter measurement (json_class).
+        reg = self.registry({
+            "prompt-strict": {"json_class": "tolerant", "med_in": 10,
+                              "med_out": 5, "p50": 10},
+            "t07-only": {"json_class": "strict", "med_in": 10,
+                         "med_out": 5, "p50": 10},
+        })
+        reg.set_json_prompt_class("prompt-strict", "strict")
+        reg.set_json_prompt_class("t07-only", "no")
+        r = self.router(reg, FakeClient(), ["t07-only", "prompt-strict"])
+        self.assertEqual(jsonroute.candidates(r, "lead"), ["prompt-strict"])
+
     def test_strict_before_tolerant_then_cost_then_latency(self):
         reg = self.registry({
             "s-cheap": {"json_class": "strict", "med_in": 100, "med_out": 50, "p50": 500},
@@ -329,6 +343,7 @@ class JsonRouteIntegrationTests(Base):
                 "status": "done", "summary": "wrote x.py", "files_changed": ["x.py"]}}}]})
         self.srv.add("v-tolerant", {"content": json.dumps(
             {"verdict": "pass", "issues": []})})
+        (Path(self.cwd.name) / "x.py").write_text("x = 1\n")
         try:
             code, report = rt.run("verify me")
             rid = runtime.run_id

@@ -2,7 +2,66 @@
 
 All notable changes to HYDRA. Dates are local (Termux, Android).
 
-## v1.3.1 — 2026-10-20
+> **Tag note (2026-10-20):** `v1.3.1` was first published for the task-focus
+> hotfix (`62a5a5a`). WO3's final commit now carries the `v1.3.1` tag; the
+> hotfix is preserved as `v1.3.1-taskfocus`.
+
+## v1.3.1 — WO3 Trust and Cost (2026-10-20)
+
+Makes the report match reality: what changed, what was verified, what a server
+actually served, and what the verifier cost.
+
+### Added
+
+- **Honest artifacts (A1/A5).** `files_changed` is a marker-based scan of the
+  project roots, tool-explicit files, and child-agent files. It is `null`
+  (not `[]`) when the scan is incomplete or truncated, with
+  `files_changed_method` and `scan_complete` in the report.
+- **Claim-aware verification (A2/A3).** Concrete file/HTTP/test/build claims
+  are checked against changed text and tool evidence; model prose is never
+  evidence. The latest result after the last file change wins.
+- **One-port servers (A4).** A duplicate project server is reused with one
+  warning; a foreign process gets a nearby free port and the new URL is
+  reported.
+- **Bounded verifier (B1).** Tool-less verification, separate
+  `verify_cost_usd`, `verify_rounds`, `verify_tool_calls`, `verify_ms` and a
+  budget verdict; no `ask_models`, no re-execution.
+- **Capability truth (C1/C2).** Failed tool probes stay unknown (`tools=?`),
+  native calls upgrade the registry, `models ls --roles` shows the effective
+  chain and every drop reason, and 402/404 models are re-probed before use
+  (60 s guard) plus a weekly stale refresh.
+- **Prompted JSON matrix (C3).** 2 trials × 3 schemas with and without
+  `format`; strict/tolerant validation; `json_prompt_class` drives F1 routing.
+
+### Changed
+
+- **Prompt footprint (B2):** the 15 individual Termux wrappers are hidden
+  behind one `termux` umbrella tool with an action enum. Measured pinned
+  prompt: 5,965 → 4,812 tokens (system 1,414, env 462, tools 2,829).
+- **Cost UI (B3):** free `$0` is green, paid spend is amber; `/cost`, the
+  closing card and the exit line agree, and the exit line shows run **and**
+  session totals.
+- **Bench realism (C4):** B3 mismatches now print the first five expected vs
+  actual lines. A 2-model × 3-run re-run showed B3 is flaky (2/6 passes), so
+  the earlier n=1 result should not drive tuning.
+- **Running screen (E1):** the composer stays visible and typeable during a
+  run; status keeps `esc to stop`; footer keeps `ctx`/cost/model at 40–120
+  columns.
+
+### Verified
+
+- 402 tests + 176 subtests pass; `hydra eval seed` 10/10; 40 UI goldens
+  regenerated for the cost/footer changes.
+- Real smoke (`hello.txt`): 3 turns, 1 agent, verifier `gpt-oss:20b`, 0
+  verifier tool calls, `files_changed=["hello.txt"]` (`mixed`, scan complete),
+  cost $0.000428 total, verifier share $0.000057 (13%).
+- Real probe: `nemotron-3-ultra` corrected from `tools=no` to `tools=yes`;
+  `gpt-oss:120b` confirmed `tools=yes`; `nemotron-3-nano:30b` stayed `no`.
+- C3: 6 models × 12 prompted calls (72 total), $0.0149; five models strict,
+  nano `no` (network/timeouts).
+- C4: 2 models × 3 B3 runs, $0.0252; 2/6 pass, with content diffs.
+
+## v1.3.1-taskfocus — 2026-10-20 (first v1.3.1 publish)
 
 "Whatever I ask, it only builds the website" — task-focus fix.
 

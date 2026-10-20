@@ -164,6 +164,15 @@ def _cost(value) -> str:
     return f"${v:.3f}"
 
 
+def _cost_style(value) -> str:
+    """Free is green; a real spend is highlighted (B3)."""
+    try:
+        v = float(value or 0)
+    except Exception:
+        v = 0
+    return "ok" if v <= 0.0001 else "accent"
+
+
 def _row_lr(left: str, right: str, width: int, style: str) -> tuple:
     """One row with *right* right-aligned; drop the stat when there is no room."""
     left = str(left or "")
@@ -175,6 +184,47 @@ def _row_lr(left: str, right: str, width: int, style: str) -> tuple:
     if not right:
         return (U.clip_display(left, width), style)
     return (left + " " * max(1, width - lw - rw) + right, style)
+
+
+def _row_lr_parts(left: str, right: list, width: int, style: str) -> list:
+    """Like _row_lr but the right side may be coloured span by span (B3)."""
+    left = str(left or "")
+    width = max(8, int(width))
+    right = [(str(t), st) for t, st in (right or []) if str(t)]
+    rw = sum(U.display_width(t) for t, _ in right)
+    if not right:
+        return [(U.clip_display(left, width), style)]
+    lw = U.display_width(left)
+    if lw + rw + 1 > width:
+        left = U.clip_display(left, max(1, width - rw - 1))
+        lw = U.display_width(left)
+    gap = max(1, width - lw - rw)
+    return [(left, style), (" " * gap, "")] + right
+
+
+def _fit_card_bits(left: str, bits: list, width: int) -> list:
+    """Keep the title readable on narrow cards: fall back to the money bit."""
+    rw = sum(U.display_width(t) for t, _ in bits)
+    if U.display_width(left) + rw + 1 <= width:
+        return bits
+    money = [b for b in bits if b[1] in ("ok", "accent")]
+    return money or bits
+
+
+def _card_bits(meta: dict, sep: str) -> list:
+    parts = []
+    if meta.get("turns") is not None:
+        parts.append((f"{meta['turns']} turns", "muted"))
+    if meta.get("duration") is not None:
+        parts.append((U.fmt_elapsed(meta["duration"]), "muted"))
+    if meta.get("cost") is not None:
+        parts.append((_cost(meta["cost"]), _cost_style(meta.get("cost"))))
+    out = []
+    for i, (text, st) in enumerate(parts):
+        if i:
+            out.append((f" {sep} ", "muted"))
+        out.append((text, st))
+    return out
 
 
 def _diff_rows(old, new, width: int, limit: int = 4):
@@ -431,15 +481,10 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
                 "failed": sym("bad")}.get(status, sym("tool"))
         title = {"done": "Done", "partial": "Partial",
                  "failed": "Failed"}.get(status, status.title())
-        bits = []
-        if m.get("turns") is not None:
-            bits.append(f"{m['turns']} turns")
-        if m.get("duration") is not None:
-            bits.append(U.fmt_elapsed(m["duration"]))
-        if m.get("cost") is not None:
-            bits.append(_cost(m["cost"]))
-        out.append(_row_lr(f" {icon} {title}",
-                           f" {sym('sep')} ".join(bits), width, st))
+        left = f" {icon} {title}"
+        out.append(_row_lr_parts(
+            left, _fit_card_bits(left, _card_bits(m, sym("sep")), width),
+            width, st))
         stats = m.get("file_stats") if isinstance(m.get("file_stats"), dict) else {}
         files = m.get("files")
         if files is None:
@@ -537,15 +582,10 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
                 "failed": sym("bad")}.get(status, sym("tool"))
         title = {"done": "Done", "partial": "Partial",
                  "failed": "Failed"}.get(status, status.title())
-        bits = []
-        if m.get("turns") is not None:
-            bits.append(f"{m['turns']} turns")
-        if m.get("duration") is not None:
-            bits.append(U.fmt_elapsed(m["duration"]))
-        if m.get("cost") is not None:
-            bits.append(_cost(m["cost"]))
-        out.append(_row_lr(f" {icon} {title}",
-                           f" {sym('sep')} ".join(bits), width, st))
+        left = f" {icon} {title}"
+        out.append(_row_lr_parts(
+            left, _fit_card_bits(left, _card_bits(m, sym("sep")), width),
+            width, st))
         if status == "failed":
             why = str(m.get("why") or "").strip()
             if why:
@@ -1589,7 +1629,7 @@ class App:
         if self.run_id:
             rows.append((U.clip_display(str(self.run_id), width), "dim"))
             rows.append((f"{self.turns} turns {self.theme.sym('sep')} "
-                         f"{U.fmt_money(self.cost)}", "dim"))
+                         f"{_cost(self.cost)}", "dim"))
             if self.current_model:
                 rows.append((U.short(self.current_model, width), "dim"))
         else:
@@ -1690,6 +1730,17 @@ class App:
         if right_text and lw + rw + 2 <= width:
             gap = max(1, width - lw - rw)
             return [left + [(" " * gap, ""), (right_text, "muted")]]
+        if right_text:
+            # Keep the cancel hint: drop the secondary token counter first.
+            core = left[:2] if len(left) > 2 else left
+            clw = sum(U.display_width(t) for t, _ in core)
+            if clw + rw + 2 <= width:
+                gap = max(1, width - clw - rw)
+                return [core + [(" " * gap, ""), (right_text, "muted")]]
+            room = max(4, width - rw - 2)
+            plain = U.clip_display("".join(t for t, _ in core), room)
+            return [[(plain, left[0][1]), (" " * max(1, width - room - rw), ""),
+                     (right_text, "muted")]]
         if lw > width:
             left = [(U.clip_display("".join(t for t, _ in left), width), left[0][1])]
         return [left]
@@ -1702,24 +1753,48 @@ class App:
                                      / self.work_ctx)))
         cost = (self.cost if (self.running or self.run_id)
                 else (self.session_cost or self.cost))
+        money = (_cost(cost), _cost_style(cost))
         if self._palette_active():
-            left_text = f"↑↓ select {sep} tab complete"
-            right_text = f"ctx {ctx}% {sep} {_cost(cost)}"
+            left_parts = [("↑↓ select " + sep + " tab complete", "muted")]
+            right_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]
         elif self.running:
-            left_text = f"ctx {ctx}% {sep} {_cost(cost)}"
-            right_text = (U.short(self.current_model, max(8, width // 3))
-                          if self.current_model else "")
+            left_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]
+            right_parts = [(U.short(self.current_model, max(8, width // 3)),
+                            "muted")] if self.current_model else []
         else:
-            left_text = f"/ commands {sep} @ files {sep} ! shell"
-            right_text = f"ctx {ctx}% {sep} {_cost(cost)}"
+            left_parts = [("/ commands " + sep + " @ files " + sep
+                           + " ! shell", "muted")]
+            right_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]
         if self.steer_queued:
-            left_text = f"{self.steer_queued} queued {sep} " + left_text
-        lw, rw = U.display_width(left_text), U.display_width(right_text)
-        if lw + rw + 2 > width:
+            left_parts.insert(0, (f"{self.steer_queued} queued {sep} ",
+                                  "muted"))
+        left_text = "".join(t for t, _ in left_parts)
+        lw = U.display_width(left_text)
+        rw = sum(U.display_width(t) for t, _ in right_parts)
+        if right_parts and lw + rw + 2 > width:
+            # Narrow: shorten the static hint instead of cutting a word in
+            # half; the money/cancel information stays visible.
+            if self.running:
+                left_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]
+                if self.current_model:
+                    right_parts = []
+            elif self._palette_active():
+                left_parts = [("↑↓ select", "muted")]
+            else:
+                left_parts = [("/ commands", "muted")]
+                right_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]
+            left_text = "".join(t for t, _ in left_parts)
+            lw = U.display_width(left_text)
+            rw = sum(U.display_width(t) for t, _ in right_parts)
+        if right_parts and lw + rw + 2 > width:
+            left_text = U.clip_display(left_text, max(4, width - rw - 2))
+            left_parts = [(left_text, "muted")]
+            lw = U.display_width(left_text)
+        if not right_parts:
             return [(" " + U.clip_display(left_text, max(4, width - 1)),
                      "muted")]
-        return [(" " + left_text, "muted"), (" " * (width - lw - rw - 1), ""),
-                (right_text, "muted")]
+        return ([(" ", "muted")] + left_parts +
+                [(" " * max(1, width - lw - rw - 1), "")] + right_parts)
 
     def _input_box(self, width: int, max_rows: int):
         prompt = self.theme.sym("prompt") + " "
@@ -1820,8 +1895,12 @@ class App:
 
         rows: list = []
         for i in range(transcript_height):
-            text, style = view[i] if i < len(view) else ("", "")
-            spans = [(U.pad_display(text, main_w), style)]
+            item = view[i] if i < len(view) else ("", "")
+            if isinstance(item, list):
+                spans = _pad_spans(item, main_w)
+            else:
+                text, style = item
+                spans = [(U.pad_display(text, main_w), style)]
             if side_w:
                 stext, sstyle = sidebar[i] if i < len(sidebar) else ("", "")
                 spans += [(self.theme.sym("box_v"), "border"),
@@ -2322,8 +2401,11 @@ class App:
                       glyphs=self.theme.glyphs, depth="none")
         lines: list = []
         for b in self.blocks:
-            for text, _style in render_block(b, width, theme, True):
-                lines.append(text.rstrip())
+            for row in render_block(b, width, theme, True):
+                if isinstance(row, list):
+                    lines.append("".join(t for t, _ in row).rstrip())
+                else:
+                    lines.append(row[0].rstrip())
         while lines and not lines[-1]:
             lines.pop()
         return "\n".join(lines) + "\n"
@@ -2633,8 +2715,8 @@ class App:
             lines = [f"run   {self.run_id or '(none)'}",
                      f"tokens {U.fmt_tokens(self.tokens_in)} in / "
                      f"{U.fmt_tokens(self.tokens_out)} out · {self.turns} model calls",
-                     f"cost  {U.fmt_money(self.cost)} this run · "
-                     f"{U.fmt_money(session)} session"]
+                     f"cost  {_cost(self.cost)} this run · "
+                     f"{_cost(session)} session"]
             if self.rt is not None and self.run_id:
                 try:
                     tot = self.rt.usage_totals()
@@ -2642,7 +2724,7 @@ class App:
                     for m, d in sorted(by.items()):
                         lines.append(f"  {m:<24} {U.fmt_tokens(d.get('in', 0))}↑ "
                                      f"{U.fmt_tokens(d.get('out', 0))}↓ "
-                                     f"{U.fmt_money(d.get('est_usd', 0))}")
+                                     f"{_cost(d.get('est_usd', 0))}")
                 except Exception:
                     pass
             self.add_notice("\n".join(lines))
@@ -3337,7 +3419,8 @@ class App:
         print()
         print(f"{status} · {self.run_id} · {self.turns} turns · "
               f"{self.agent_count} agents · {U.fmt_tokens(self.tokens_in)} in / "
-              f"{U.fmt_tokens(self.tokens_out)} out · {U.fmt_money(self.cost)}")
+              f"{U.fmt_tokens(self.tokens_out)} out · "
+              f"run {_cost(self.cost)} · session {_cost(self.session_cost)}")
         summary = str(rep.get("summary") or "").strip()
         if summary:
             print()

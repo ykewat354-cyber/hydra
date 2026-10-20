@@ -39,6 +39,9 @@ class Swarm:
     def _setup(self, agent: Agent) -> None:
         agent.journal = self.rt.journal
         agent.runtime = self.rt
+        if self.rt.journal is not None:
+            agent.data["files_marker"] = str(
+                self.rt.journal.dir / "files.marker")
 
     def agent(self, aid: str):
         with self.lock:
@@ -106,6 +109,8 @@ class Swarm:
                         pass
                 with self.lock:
                     self._reports[agent.id] = agent.report_out()
+                parent = self.rt.agents.get(getattr(agent, "parent_id", None))
+                self.merge_child(parent, agent.id)
                 done.set()
                 if self.rt.journal:
                     try:
@@ -117,6 +122,24 @@ class Swarm:
         th = threading.Thread(target=work, name=f"hydra-{agent.id}", daemon=True)
         th.start()
         return th
+
+    def merge_child(self, parent, child_id: str) -> None:
+        """A5: union a child's files_changed into the parent; None is sticky."""
+        if parent is None:
+            return
+        with self.lock:
+            rep = self._reports.get(child_id)
+            if not isinstance(rep, dict):
+                return
+            files = rep.get("files_changed")
+            if files is None:
+                parent.data["child_files_null"] = True
+                return
+            cur = parent.data.setdefault("child_files", [])
+            for f in files:
+                f = str(f)
+                if f not in cur:
+                    cur.append(f)
 
     # -------------------------------------------------- wait / reports
     def wait(self, ids, timeout=None) -> str:

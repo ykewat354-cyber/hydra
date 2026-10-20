@@ -28,4 +28,4 @@
 ╭──────────────────────────────────╮
 │ ❯ Ask HYDRA to build, fix, debug │
 ╰──────────────────────────────────╯
- / commands · @ files · ! shell     
+ / commands              ctx 0% · $0

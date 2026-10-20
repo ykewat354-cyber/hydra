@@ -28,4 +28,4 @@ tested it.
 ╭──────────────────────────────────╮
 │ ❯ Ask HYDRA to build, fix, debug │
 ╰──────────────────────────────────╯
- / commands · @ files · ! shell     
+ / commands         ctx 31% · $0.004

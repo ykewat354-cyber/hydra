@@ -5,6 +5,7 @@ exceptions to ``ERROR: <type>: <message>`` + a short traceback tail.
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 import re
 import threading
@@ -43,19 +44,41 @@ def _record_writes(agent, name: str, args: dict) -> None:
         pass
 
 
+def _is_write(name: str, args: dict) -> bool:
+    try:
+        from ..artifacts import is_write_call
+        return is_write_call(name, args)
+    except Exception:
+        return name in ("write_file", "edit_file", "apply_patch")
+
+
 class Tool:
     def __init__(self, name: str, description: str, parameters: dict, fn,
-                 group: str = "core"):
+                 group: str = "core", hide_schema: bool = False):
         self.name = name
         self.description = description
         self.parameters = parameters or {"type": "object", "properties": {}}
         self.fn = fn
         self.group = group
+        # Hidden tools stay callable (and testable) but cost no prompt tokens;
+        # the umbrella `termux` tool exposes their actions instead.
+        self.hide_schema = bool(hide_schema)
 
     def schema(self) -> dict:
+        # B2: keep the gist in every description; verbose tails belong in the
+        # docs, not in the first prompt of every free-model turn. Optional
+        # parameter help is dropped too (types stay).
+        desc = " ".join(str(self.description or "").split())
+        if len(desc) > 56:
+            desc = desc[:55].rstrip(" ,;:.") + "…"
+        params = copy.deepcopy(self.parameters or {})
+        required = set(params.get("required") or [])
+        for key, prop in (params.get("properties") or {}).items():
+            if key not in required and isinstance(prop, dict):
+                prop.pop("description", None)
         return {"type": "function",
-                "function": {"name": self.name, "description": self.description,
-                             "parameters": self.parameters}}
+                "function": {"name": self.name, "description": desc,
+                             "parameters": params}}
 
 
 class ToolContext:
@@ -114,6 +137,8 @@ def caps_allowed(name: str, caps: dict) -> bool:
         return bool(caps.get("web_search", True))
     if name == "web_fetch":
         return bool(caps.get("web_fetch", True))
+    if name == "termux":
+        return bool(caps.get("termux_api", True))
     if name == "view_image":
         return bool(caps.get("vision", True))
     if name.startswith("termux_"):
@@ -169,6 +194,8 @@ class Registry:
             if is_mcp and not mcp_ok:
                 continue
             if names is not None and n not in names and not is_mcp:
+                continue
+            if getattr(t, "hide_schema", False):
                 continue
             if not caps_allowed(n, caps):
                 continue
@@ -257,19 +284,27 @@ class Executor:
         out = []
         for i, (call, content) in enumerate(zip(calls, results)):
             name = call["function"]["name"]
-            if not str(content).startswith("ERROR:"):
-                _record_writes(agent, name, call["function"]["arguments"])
+            args = call["function"]["arguments"]
+            failed = str(content).startswith("ERROR:")
+            if not failed:
+                _record_writes(agent, name, args)
             content = self._cap(content, agent, name)
             if self.rt.redact is not None:
                 content = self.rt.redact(content)  # secrets never reach the model
             if name.startswith("browser_") and self._untrusted(name):
                 content = self._wrap_untrusted(content, name)
+            ev_seq = None
+            changed = bool(not failed and _is_write(name, args))
             if self.rt.journal:
-                self.rt.journal.event("tool_result", agent.id, tool=name,
-                                      chars=len(content), ms=elapsed[i],
-                                      lines=content.count("\n") + 1,
-                                      preview=content[:400])
-            out.append({"role": "tool", "tool_name": name, "content": content})
+                ev = self.rt.journal.event("tool_result", agent.id, tool=name,
+                                           chars=len(content), ms=elapsed[i],
+                                           lines=content.count("\n") + 1,
+                                           changed=changed,
+                                           preview=content[:400])
+                ev_seq = (ev or {}).get("seq")
+            out.append({"role": "tool", "tool_name": name, "content": content,
+                        "ev": ev_seq, "turn": int(getattr(agent, "turns", 0) or 0),
+                        "changed": changed})
         return out
 
     def _timed(self, name: str, args: dict, agent):

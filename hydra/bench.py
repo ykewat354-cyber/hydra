@@ -139,6 +139,25 @@ def b3_expected() -> str:
     return "\n".join(out) + "\n"
 
 
+def content_diff(want: str, got: str, limit: int = 5) -> str:
+    """First *limit* differing lines, expected (-) then actual (+) each."""
+    want_lines = str(want).splitlines()
+    got_lines = str(got).splitlines()
+    out = []
+    for i in range(max(len(want_lines), len(got_lines))):
+        w = want_lines[i] if i < len(want_lines) else None
+        g = got_lines[i] if i < len(got_lines) else None
+        if w == g:
+            continue
+        if w is not None:
+            out.append("-" + w[:200])
+        if g is not None:
+            out.append("+" + g[:200])
+        if len(out) >= limit * 2:
+            break
+    return "\n".join(out[:limit * 2])
+
+
 def _run_py(workdir: Path, args: list, timeout: int = 120):
     return subprocess.run([sys.executable, *args], cwd=str(workdir),
                           capture_output=True, text=True, timeout=timeout)
@@ -174,7 +193,9 @@ def check_fixture(task_id: str, workdir, meta: dict) -> tuple:
             want = str(meta.get("expected") or "").strip()
             if got == want:
                 return True, "todos.md matches the expected output"
-            return False, f"todos.md mismatch ({len(got)} vs {len(want)} chars)"
+            diff = content_diff(want, got)
+            return False, (f"todos.md mismatch ({len(got)} vs {len(want)} chars)"
+                           + ("\n" + diff if diff else ""))
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
     return False, f"unknown bench task: {task_id}"

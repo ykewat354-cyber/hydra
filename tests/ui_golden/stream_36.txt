@@ -24,7 +24,7 @@ calc.py:
 ├ a1 reviewer · gemma4:31b          
                                     
 Now writing the final summary▍      
-▖ Responding…  4.5s · ↓ 900 tok     
+▖ Responding…  4.5s      esc to stop
 ╭──────────────────────────────────╮
 │ ❯ steer this run · esc stops     │
 ╰──────────────────────────────────╯

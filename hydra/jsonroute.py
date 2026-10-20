@@ -103,14 +103,14 @@ def candidates(router, role: str, schema_name: str = "", policy: str = None,
     for name in sorted(registry.data.get("models") or {}):
         if name not in union and registry.status_of(name) == "ok":
             union.append(name)
-    keep = [m for m in union if registry.json_class_of(m) != "no"]
+    keep = [m for m in union if registry.routing_json_class_of(m) != "no"]
     filtered = [m for m in keep if m not in exclude]
     if filtered:
         keep = filtered
     elif exclude:
         keep = list(keep)  # only the excluded model conforms: keep it anyway
     measured = [m for m in keep
-                if registry.json_class_of(m) in ("strict", "tolerant")]
+                if registry.routing_json_class_of(m) in ("strict", "tolerant")]
     if not measured:
         # Nothing measured-conformant yet (or everything is class "no"):
         # keep the pre-F1 chain order instead of ranking on fabricated costs.
@@ -135,7 +135,7 @@ def candidates(router, role: str, schema_name: str = "", policy: str = None,
     prices = getattr(router, "prices", None) or {}
 
     def rank(m):
-        cls = registry.json_class_of(m)
+        cls = registry.routing_json_class_of(m)
         cls_rank = 0 if cls == "strict" else (1 if cls == "tolerant" else 2)
         tin, tout = _est_tokens(registry, m, schema_name, fb)
         cost = C.est_usd(prices, m, tin, tout)
@@ -245,7 +245,8 @@ def _journal(router, role, schema_name, model, attempts, ok, policy) -> None:
 
 
 def _single_fallback(router, messages, role, schema, schema_name, think,
-                     agent, task, model_hint=None) -> Structured:
+                     agent, task, model_hint=None,
+                     usage_role=None) -> Structured:
     """No measured-conformant candidate: pre-F1 behaviour, one router call.
 
     The router keeps its own failover across the role chain; the tolerant
@@ -257,7 +258,8 @@ def _single_fallback(router, messages, role, schema, schema_name, think,
     attempts: list = []
     try:
         reply = router.chat(messages, role=role, agent=agent, think=think,
-                            format=schema, model=model_hint)
+                            format=schema, model=model_hint,
+                            usage_role=usage_role)
     except Exception as exc:
         return Structured(attempts=attempts,
                           error=f"{type(exc).__name__}: {exc}"[:200])
@@ -279,7 +281,8 @@ def _single_fallback(router, messages, role, schema, schema_name, think,
 def structured_chat(router, messages, *, role: str, schema: dict,
                     schema_name: str, think=None, agent=None, exclude=(),
                     policy: str = None, task: str = "",
-                    model_hint: str = None) -> Structured:
+                    model_hint: str = None,
+                    usage_role: str = None) -> Structured:
     """One structured call, F1-routed. Never raises for schema violations.
 
     ``think`` is accepted for call-site compatibility and ignored: F1 always
@@ -296,11 +299,12 @@ def structured_chat(router, messages, *, role: str, schema: dict,
     cands = candidates(router, role, schema_name=schema_name, policy=policy,
                        exclude=exclude)
     policy_ok = any(registry is not None
-                    and registry.json_class_of(m) in ("strict", "tolerant")
+                    and registry.routing_json_class_of(m) in ("strict", "tolerant")
                     for m in cands)
     if not policy_ok:
         return _single_fallback(router, list(messages), role, schema,
-                                schema_name, think, agent, task, model_hint)
+                                schema_name, think, agent, task, model_hint,
+                                usage_role)
     attempts: list = []
     base = list(messages)
     for model in cands:
@@ -311,7 +315,8 @@ def structured_chat(router, messages, *, role: str, schema: dict,
             try:
                 reply = router.chat(msgs, role=role, agent=agent, model=model,
                                     think=think_val, format=schema,
-                                    chain_override=[model])
+                                    chain_override=[model],
+                                    usage_role=usage_role)
             except Exception as exc:
                 attempts.append({"model": model, "stage": stage,
                                  "error": f"{type(exc).__name__}: {exc}"[:200]})
