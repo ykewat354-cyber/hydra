@@ -332,6 +332,14 @@ class BootInstallTests(unittest.TestCase):
             for name in (".bashrc", ".zshrc"):
                 self.assertNotIn(B.MARK_BEGIN, (home / name).read_text())
 
+    def test_daemon_line_buffers_its_redirected_log(self):
+        from hydra import cli
+        fake = mock.Mock()
+        with mock.patch.object(sys, "stdout", fake), \
+             mock.patch("hydra.cli._key_preflight", return_value=False):
+            self.assertEqual(cli.cmd_daemon({}, ["--resume"]), 2)
+        fake.reconfigure.assert_called_once_with(line_buffering=True)
+
     def test_daemon_lock_is_single_owner(self):
         from hydra import boot as B
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,2 +1,2 @@
 """HYDRA — Termux-native autonomous multi-agent harness on Ollama Cloud."""
-__version__ = "1.3.3"
+__version__ = "1.3.4"

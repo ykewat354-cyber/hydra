@@ -1136,6 +1136,13 @@ def cmd_daemon(cfg, args) -> int:
     One daemon per HYDRA_HOME: a kernel flock makes extra boot/shell hooks
     harmless.  The result file is the integration seam for external bridges.
     """
+    # When launched by boot/shell hooks, stdout is a file: Python would buffer
+    # every line until the buffer fills, leaving `hydra boot status` users with
+    # an empty daemon.log for hours.  Line buffering makes progress visible.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     if not _key_preflight(cfg):
         return 2
     from . import boot as B

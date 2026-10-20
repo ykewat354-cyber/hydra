@@ -6,6 +6,13 @@ All notable changes to HYDRA. Dates are local (Termux, Android).
 > hotfix (`62a5a5a`). WO3's final commit now carries the `v1.3.1` tag; the
 > hotfix is preserved as `v1.3.1-taskfocus`.
 
+## v1.3.4 — daemon log flush (2026-10-20)
+
+- **Visible auto-resume logs.** `hydra daemon` now line-buffers stdout when it
+  is launched by Termux:Boot or a shell hook. Previously Python block-buffered
+  the redirected `~/.hydra/daemon.log`, so boot progress could stay invisible
+  for hours and be lost on a hard kill. No behavior change for queue/resume.
+
 ## v1.3.3 — resume + TUI patch (2026-10-20)
 
 Fixes the "resume does nothing after Termux restarts" report and upgrades the

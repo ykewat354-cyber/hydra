@@ -1,5 +1,5 @@
                                                                                          │AGENTS                        
- █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.3.3                                                        │  (none yet)                  
+ █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.3.4                                                        │  (none yet)                  
  █▀█ ▀█▀ █ █ ██▀ █▀█  nemotron-3-super                                                   │                              
  ▀ ▀  ▀  ▀▀  ▀ ▀ ▀ ▀  free plan · key ✓ loaded                                           │RUN                           
                                                                                          │(no run yet)                  
