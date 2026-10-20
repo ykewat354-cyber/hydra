@@ -259,9 +259,14 @@ class AppTests(unittest.TestCase):
         self.assertTrue(app.input.startswith("/help"))
         app.handle_action("ENTER")
         app.drain()
+        # the help lands as a transcript notice; the window shows the tail of
+        # the transcript, so check the block itself plus the visible tail
+        notice = [b for b in app.blocks if b.kind == "notice"][-1]
+        self.assertIn("commands", notice.text)
+        self.assertIn("/copy", notice.text)
         text = "\n".join(app.render(80, 40))
-        self.assertIn("commands", text)
-        self.assertIn("/copy", text)
+        self.assertIn("/quit", text)
+        self.assertIn("Ctrl-T", text)
 
     def test_double_ctrl_c_quits(self):
         app = self._app()

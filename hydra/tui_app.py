@@ -618,10 +618,16 @@ commands
   /help              this help
   /clear             clear the screen (the run keeps going)
   /copy              copy the last answer or report file to the clipboard
+  /open [URL]        open the last served link with the system browser
+  /expand [N]        show one tool card's full args/output (N from the end)
+  /collapse          collapse every expanded tool card
+  /why               why the last run finished the way it did
+  /export [FILE]     write the whole transcript to FILE (plain text)
+  /compact           force context compaction now
   /plan              ask the lead to write a todo/DAG plan (then follow it)
   /pause /unpause    pause between turns
   /resume [RUN]      resume an interrupted run
-  /tree              agent tree with status and tokens
+  /tree /agents      agent tree with status and tokens
   /kill aN           stop one sub-agent (subtree included)
   /model [role=]m    pin a model first for a role (default lead)
   /models            role chains
@@ -631,11 +637,19 @@ commands
   /runs              recent runs
   /doctor            key / host / models / tmux checks
   /init              explore this repo and write HYDRA.md
+  /ui [MODE]         show or save the UI mode (inline|fullscreen|plain)
+  /glyphs            which symbols this font can draw
   /keys              key bindings
   /quit              leave (an active run is journaled; hydra resume continues)
 
+input
+  @path              attach files: type @ and pick from the list (Tab/Enter)
+  !command           run a shell command here and show the output
+  paste              big pastes collapse to a [pasted N lines] chip
+
 keys
-  Enter send · Tab complete a /command · Up/Down (+ touch) scroll transcript
+  Enter send · Tab complete a /command or @path
+  Up/Down pick from the palette, else scroll the transcript (touch sends these)
   Ctrl-P/Ctrl-N history · Shift+Up/Down history · PgUp/PgDn scroll
   End live output when scrolled · mouse wheel also scrolls
   Ctrl-C cancel (twice = stop) · Esc cancel · Ctrl-D quit · Ctrl-O copy
@@ -644,8 +658,8 @@ keys
 
 KEYS_TEXT = """\
 Enter       send the task / steer
-Tab         complete a slash command
-Up / Down   scroll the transcript (touch-scroll sends these too)
+Tab         complete a slash command or an @file path
+Up / Down   pick from the palette, else scroll (touch-scroll sends these too)
 Ctrl-P/N    previous / next input history
 Shift+Up/Dn previous / next input history
 PgUp/PgDn   scroll the transcript
@@ -858,6 +872,43 @@ class App:
                 self.blocks[idx].meta["tips"] = False
             except Exception:
                 pass
+
+    def _save_ui_mode(self, mode: str) -> bool:
+        """Persist ``ui.mode`` in ~/.hydra/config.toml (edit or create)."""
+        path = C.home() / "config.toml"
+        try:
+            text = path.read_text(encoding="utf-8") if path.is_file() else ""
+        except Exception:
+            return False
+        out: list = []
+        in_ui = done = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                if in_ui and not done:
+                    out.append(f'mode = "{mode}"')
+                    done = True
+                in_ui = stripped == "[ui]"
+                out.append(line)
+                continue
+            if in_ui and not done and stripped.split("=")[0].strip() == "mode":
+                out.append(f'mode = "{mode}"')
+                done = True
+                continue
+            out.append(line)
+        if in_ui and not done:
+            out.append(f'mode = "{mode}"')
+            done = True
+        if not done:
+            if out and out[-1].strip():
+                out.append("")
+            out.extend(["[ui]", f'mode = "{mode}"'])
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+            return True
+        except Exception:
+            return False
 
     def _ensure_agent(self, aid: str, **kw) -> AgentInfo:
         aid = str(aid or "a0")
@@ -1102,6 +1153,8 @@ class App:
             prev = str(ev.get("preview") or "")
             ok, brief = U.result_brief(name, prev, chars=chars, ms=ms,
                                        lines=lines, width=max(20, self.width - 14))
+            if ev.get("ok") is not None:
+                ok = bool(ev.get("ok"))     # local `!cmd` knows the exit code
             # the card shows the elapsed time right-aligned; drop the copy that
             # result_brief appends for the plain renderer
             brief = re.sub(r"\s*·\s*\d+(?:\.\d+)?s\s*$", "", str(brief or "")).strip()
@@ -1372,7 +1425,8 @@ class App:
         out: list = []
         last_kind = None
         for b in self.blocks:
-            rows = render_block(b, width, self.theme, self.verbose)
+            rows = render_block(b, width, self.theme,
+                                self.verbose or bool(b.meta.get("expanded")))
             if not rows:
                 continue
             quiet = (b.kind in ("tool",) and last_kind == "tool") or \
@@ -1488,8 +1542,7 @@ class App:
         return "Working"
 
     def _palette_active(self) -> bool:
-        return (self.input.startswith("/") and " " not in self.input
-                and bool(self._ac_matches()))
+        return bool(self._ac_matches())
 
     def _palette_rows(self, width: int) -> list:
         if not self._palette_active():
@@ -1498,11 +1551,16 @@ class App:
         descs = {c: d for c, d in COMMANDS}
         rows = []
         for i, c in enumerate(matches[:6]):
-            desc = U.end_ellipsis(descs.get(c, ""), max(8, width - 14))
             selected = i == (self.ac_index % len(matches))
             marker = self.theme.sym("prompt") if selected else " "
             style = "accent" if selected else "muted"
-            rows.append([(f" {marker} {c:<10.10} {desc}", style)])
+            if c.startswith("/"):
+                desc = U.end_ellipsis(descs.get(c, ""), max(8, width - 14))
+                rows.append([(f" {marker} {c:<10.10} {desc}", style)])
+            else:
+                label = U.end_ellipsis("@" + c, max(10, width - 12))
+                desc = "dir" if c.endswith("/") else "file"
+                rows.append([(f" {marker} {label} {desc}", style)])
         return rows
 
     def _status(self, width: int) -> list:
@@ -1692,11 +1750,49 @@ class App:
         return rows, cursor
 
     # -------------------------------------------------- input
+    def _mention(self):
+        """The trailing ``@word`` under the caret, or ``None``."""
+        text = self.input[:self.cursor]
+        m = re.search(r"(?:^|\s)(@[^\s]*)$", text)
+        return m.group(1) if m else None
+
+    def _files(self) -> list:
+        """Relative paths under cwd (dirs end in ``/``), cached for ~5 s."""
+        root = str(self.cwd)
+        now = time.time()
+        cache = getattr(self, "_files_cache", None)
+        if cache and cache[0] == root and now - cache[1] < 5.0:
+            return cache[2]
+        out: list = []
+        skip = {".git", ".svn", "node_modules", "__pycache__", ".venv",
+                "venv", ".mypy_cache", ".pytest_cache", "dist", "build"}
+        try:
+            base = Path(root)
+            for p in base.rglob("*"):
+                if skip & set(p.parts):
+                    continue
+                rel = str(p.relative_to(base))
+                out.append(rel + "/" if p.is_dir() else rel)
+                if len(out) >= 2000:
+                    break
+        except Exception:
+            out = []
+        out.sort(key=lambda s: (not s.endswith("/"), s.lower()))
+        self._files_cache = (root, now, out)
+        return out
+
     def _ac_matches(self) -> list:
-        if not self.input.startswith("/") or " " in self.input:
-            return []
-        pre = self.input
-        return [c for c, _desc in COMMANDS if c.startswith(pre)]
+        if self.input.startswith("/") and " " not in self.input:
+            pre = self.input
+            return [c for c, _desc in COMMANDS if c.startswith(pre)]
+        word = self._mention()
+        if word is not None:
+            stem = word[1:]
+            # prefix of the relative path or of the basename (like a picker)
+            return [f for f in self._files()
+                    if f.startswith(stem)
+                    or f.rstrip("/").rsplit("/", 1)[-1].startswith(stem)][:60]
+        return []
 
     def feed_bytes(self, data: bytes):
         if not data:
@@ -1740,7 +1836,12 @@ class App:
                     break
                 self._paste_buf += buf[:end]
                 buf = buf[end + 6:]
-                self._insert_text(self._paste_buf)
+                pasted = self._paste_buf
+                self._insert_text(pasted)
+                n_lines = pasted.count("\n") + (0 if pasted.endswith("\n")
+                                                else 1)
+                if n_lines >= 3 or len(pasted) > 400:
+                    self.paste_chip = f"[pasted {n_lines} lines]"
                 self._paste_buf = ""
                 self._pasting = False
                 continue
@@ -1892,13 +1993,34 @@ class App:
         self.ac_index = 0
         self._force = True
 
+    def _preview_match(self, pick: str):
+        """Highlighting a palette row shows it in the composer."""
+        if pick.startswith("/"):
+            self.input = pick
+            self.cursor = len(self.input)
+            return
+        word = self._mention()
+        if word is not None:
+            head = self.input[:self.cursor - len(word)]
+            tail = self.input[self.cursor:]
+            self.input = head + "@" + pick + tail
+            self.cursor = len(head) + 1 + len(pick)
+
     def _complete(self):
         matches = self._ac_matches()
         if not matches:
             return
         pick = matches[self.ac_index % len(matches)]
-        self.input = pick + (" " if pick in _ARG_COMMANDS else "")
-        self.cursor = len(self.input)
+        word = self._mention()
+        if word is not None:
+            head = self.input[:self.cursor - len(word)]
+            tail = self.input[self.cursor:]
+            filler = "" if pick.endswith("/") else " "
+            self.input = head + "@" + pick + filler + tail
+            self.cursor = len(head) + 1 + len(pick) + len(filler)
+        else:
+            self.input = pick + (" " if pick in _ARG_COMMANDS else "")
+            self.cursor = len(self.input)
         self.hist_idx = None
         self._force = True
 
@@ -1944,10 +2066,9 @@ class App:
                 self._force = True
         elif action == "UP":
             matches = self._ac_matches()
-            if matches and self.input.startswith("/"):
+            if matches:
                 self.ac_index = (self.ac_index - 1) % len(matches)
-                self.input = matches[self.ac_index]
-                self.cursor = len(self.input)
+                self._preview_match(matches[self.ac_index])
                 self._force = True
             else:
                 # On a phone the terminal turns a touch-scroll into arrow keys.
@@ -1956,10 +2077,9 @@ class App:
                 self._scroll_by(3)
         elif action == "DOWN":
             matches = self._ac_matches()
-            if matches and self.input.startswith("/"):
+            if matches:
                 self.ac_index = (self.ac_index + 1) % len(matches)
-                self.input = matches[self.ac_index]
-                self.cursor = len(self.input)
+                self._preview_match(matches[self.ac_index])
                 self._force = True
             else:
                 self._scroll_by(-3)
@@ -2033,6 +2153,9 @@ class App:
         if text.startswith("/"):
             self.handle_command(text)
             return
+        if text.startswith("!"):
+            self._shell(text[1:].strip())
+            return
         if self.running:
             self.add_user(text, steer=True)
             lead = None
@@ -2059,6 +2182,46 @@ class App:
             self.history.append(text)
             if len(self.history) > 100:
                 self.history = self.history[-100:]
+
+    def _shell(self, cmd: str):
+        """``!cmd`` — run it locally and show the result as a bash card."""
+        if not cmd:
+            self.add_notice("usage: !command")
+            return
+        self.add_user("!" + cmd)
+        self._add_history("!" + cmd)
+        started = time.time()
+        try:
+            p = subprocess.run(cmd, shell=True, cwd=str(self.cwd),
+                               capture_output=True, text=True, timeout=120)
+            out = (p.stdout or "") + (p.stderr or "")
+            code = int(p.returncode)
+        except subprocess.TimeoutExpired:
+            out, code = "command timed out after 120s", 124
+        except Exception as exc:
+            out, code = str(exc), 1
+        ms = int((time.time() - started) * 1000)
+        self.event({"type": "tool_call", "agent": "a0", "tool": "bash",
+                    "args": {"cmd": cmd}})
+        self.event({"type": "tool_result", "agent": "a0", "tool": "bash",
+                    "preview": out, "chars": len(out), "ms": ms,
+                    "lines": out.count("\n") + (1 if out else 0),
+                    "ok": code == 0})
+        self.drain()
+        self.flash(f"exit {code}", 1.5)
+        self._bump()
+
+    def transcript_text(self, width: int = 100) -> str:
+        """The whole transcript as plain text (no escapes, verbose cards)."""
+        theme = Theme(color=False, ascii_only=self.theme.ascii,
+                      glyphs=self.theme.glyphs, depth="none")
+        lines: list = []
+        for b in self.blocks:
+            for text, _style in render_block(b, width, theme, True):
+                lines.append(text.rstrip())
+        while lines and not lines[-1]:
+            lines.pop()
+        return "\n".join(lines) + "\n"
 
     # -------------------------------------------------- run lifecycle
     def start_run(self, task: str):
@@ -2276,7 +2439,7 @@ class App:
             self.flash(f"verbose {'on' if self.verbose else 'off'}", 1.2)
             self._bump()
             return
-        if cmd == "/tree":
+        if cmd in ("/tree", "/agents"):
             if self.rt is None:
                 self.add_notice("no run yet")
             else:
@@ -2387,6 +2550,146 @@ class App:
                 self.add_notice("a run is already active", "warn")
             else:
                 self.start_run(INIT_TASK)
+            return
+        if cmd == "/compact":
+            lead = None
+            if self.rt is not None:
+                try:
+                    lead = self.rt.agents.get("a0")
+                except Exception:
+                    lead = None
+            if lead is None:
+                self.add_notice("no lead yet")
+                return
+            try:
+                ok = bool(lead.compact(self.rt))
+            except Exception as exc:
+                self.add_notice(f"compact failed: {exc}", "warn")
+                return
+            self.add_notice("compacted" if ok else "nothing to compact yet")
+            return
+        if cmd == "/open":
+            url = arg.strip() or self.last_url
+            if not url:
+                self.add_notice("no link to open yet")
+                return
+            exe = (shutil.which("termux-open-url")
+                   or shutil.which("termux-open"))
+            opened = False
+            if exe:
+                try:
+                    subprocess.Popen([exe, url], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                    opened = True
+                except Exception:
+                    opened = False
+            self.add_notice(f"opened {url}" if opened else f"no opener — {url}")
+            return
+        if cmd in ("/expand", "/collapse"):
+            tools = [b for b in self.blocks if b.kind == "tool"]
+            if not tools:
+                self.add_notice("no tool cards yet")
+                return
+            if cmd == "/collapse":
+                for b in tools:
+                    b.meta.pop("expanded", None)
+                self.flash("tool cards collapsed", 1.2)
+                self._bump()
+                return
+            try:
+                n = max(1, int(arg)) if arg else 1
+            except ValueError:
+                n = 1
+            n = min(n, len(tools))
+            target = tools[-n]
+            expanded = not target.meta.get("expanded")
+            if expanded:
+                target.meta["expanded"] = True
+            else:
+                target.meta.pop("expanded", None)
+            self.flash(f"card {n} from the end "
+                       f"{'expanded' if expanded else 'collapsed'}", 1.5)
+            self._bump()
+            return
+        if cmd == "/why":
+            sep = self.theme.sym("sep")
+
+            def _iss(x):
+                try:
+                    return U.issue_text(x)
+                except Exception:
+                    return str(x)
+
+            lines: list = []
+            rep = (self.last_report if isinstance(self.last_report, dict)
+                   else {})
+            if rep:
+                lines.append(f"{self.run_id or 'run'} {sep} "
+                             f"{rep.get('status') or 'done'}")
+                if rep.get("summary"):
+                    lines.append(f"  {rep['summary']}")
+                for f in (rep.get("findings") or [])[:4]:
+                    lines.append(f"  {_iss(f)}")
+                for f in (rep.get("open_issues") or [])[:4]:
+                    lines.append(f"  open: {_iss(f)}")
+            v = self.last_verify if isinstance(self.last_verify, dict) else {}
+            if v:
+                line = f"verify {v.get('verdict') or '?'}"
+                if v.get("model"):
+                    line += f" ({v['model']})"
+                if v.get("reason"):
+                    line += f" — {v['reason']}"
+                lines.append(line)
+                for iss in (v.get("issues") or [])[:5]:
+                    lines.append(f"  - {_iss(iss)}")
+            why = ""
+            for b in reversed(self.blocks):
+                if b.kind == "report" and b.meta.get("why"):
+                    why = str(b.meta["why"])
+                    break
+            if why:
+                lines.append(f"failed: {why}")
+            if not lines:
+                lines.append("no run has finished yet — nothing to explain")
+            self.add_notice("\n".join(lines))
+            return
+        if cmd == "/export":
+            import datetime as _dt
+            sep = self.theme.sym("sep")
+            name = arg.strip() or ("hydra-transcript-"
+                                   + _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                                   + ".txt")
+            path = Path(self.cwd) / name
+            try:
+                text = self.transcript_text()
+                path.write_text(text, encoding="utf-8")
+                self.add_notice(f"exported {text.count(chr(10))} lines "
+                                f"{sep} {path}")
+            except Exception as exc:
+                self.add_notice(f"export failed: {exc}", "warn")
+            return
+        if cmd == "/ui":
+            sep = self.theme.sym("sep")
+            mode = arg.strip().lower()
+            if not mode:
+                self.add_notice(f"ui mode: {self.ui_mode} {sep} "
+                                "/ui inline|fullscreen|plain")
+                return
+            if mode not in ("inline", "fullscreen", "plain"):
+                self.add_notice("usage: /ui inline|fullscreen|plain", "warn")
+                return
+            if mode == self.ui_mode:
+                self.add_notice(f"ui mode already {mode}")
+                return
+            C.set_path(self.cfg, "ui.mode", mode)
+            saved = self._save_ui_mode(mode)
+            self.add_notice(f"ui mode → {mode} — applies next launch"
+                            + (" (saved)" if saved else ""))
+            return
+        if cmd == "/glyphs":
+            from .ui_demo import _glyphs
+            from .ui_theme import strip_ansi
+            self.add_notice(strip_ansi(_glyphs(self.width)))
             return
         # project slash commands: ~/.hydra/commands or .hydra/commands
         try:

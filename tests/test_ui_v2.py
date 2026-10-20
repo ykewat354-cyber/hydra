@@ -28,9 +28,16 @@ GOLDEN_SCENES = ("home", "running", "done", "partial", "failed", "palette",
 ALL_SCENES = GOLDEN_SCENES + ("glyphs",)
 
 
+_FAKE_KEY = Path(tempfile.mkdtemp(prefix="hydra-ui-fake-key-")) / "key"
+_FAKE_KEY.write_text("test-key-not-secret\n", encoding="utf-8")
+
+
 def _cfg(tmp: Path = None):
     return C.load_config(overrides=[
         "api.host=http://127.0.0.1:1",
+        # deterministic welcome line: a fake key file, never the real one
+        "api.key_env=",
+        f"api.key_file={_FAKE_KEY}",
         "termux.wake_lock=false",
         "termux.notify_on_finish=false",
         "termux.notify_on_park=false",
