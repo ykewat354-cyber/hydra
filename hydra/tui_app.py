@@ -146,6 +146,26 @@ def _pad_spans(spans, width: int, style: str = ""):
     return spans
 
 
+def _scan_roots_text(roots, limit: int = 2) -> str:
+    """P3: compact ``scanned ~/site`` text for the report card."""
+    vals = [str(r) for r in (roots or []) if str(r)]
+    home = ""
+    try:
+        home = str(Path.home())
+    except Exception:
+        home = ""
+    out = []
+    for r in vals[:limit]:
+        s = r
+        if home and (s == home or s.startswith(home + os.sep)):
+            s = "~" + s[len(home):]
+        out.append(s)
+    text = ", ".join(out)
+    if len(vals) > limit:
+        text += f" +{len(vals) - limit}"
+    return text
+
+
 def _report_status_style(status: str) -> str:
     return {"done": "ok", "partial": "warn", "failed": "err",
             "killed": "err", "interrupted": "warn"}.get(str(status), "warn")
@@ -164,13 +184,30 @@ def _cost(value) -> str:
     return f"${v:.3f}"
 
 
-def _cost_style(value) -> str:
-    """Free is green; a real spend is highlighted (B3)."""
+def _cost_style(value, warn=None, alert=None, cfg=None) -> str:
+    """P2: threshold colours — normal below warn, amber, then red.
+
+    ``warn``/``alert`` override ``[ui] cost_warn`` (0.10) and ``cost_alert``
+    (0.50); the caller may pass a config dict instead.
+    """
     try:
         v = float(value or 0)
     except Exception:
         v = 0
-    return "ok" if v <= 0.0001 else "accent"
+    if warn is None:
+        warn = C.get(cfg or C.DEFAULTS, "ui.cost_warn", 0.10)
+    if alert is None:
+        alert = C.get(cfg or C.DEFAULTS, "ui.cost_alert", 0.50)
+    try:
+        warn = float(warn)
+        alert = float(alert)
+    except Exception:
+        warn, alert = 0.10, 0.50
+    if v < warn:
+        return "ok"
+    if v < alert:
+        return "warn"
+    return "err"
 
 
 def _row_lr(left: str, right: str, width: int, style: str) -> tuple:
@@ -218,7 +255,10 @@ def _card_bits(meta: dict, sep: str) -> list:
     if meta.get("duration") is not None:
         parts.append((U.fmt_elapsed(meta["duration"]), "muted"))
     if meta.get("cost") is not None:
-        parts.append((_cost(meta["cost"]), _cost_style(meta.get("cost"))))
+        parts.append((_cost(meta["cost"]),
+                      _cost_style(meta.get("cost"),
+                                  warn=meta.get("cost_warn"),
+                                  alert=meta.get("cost_alert"))))
     out = []
     for i, (text, st) in enumerate(parts):
         if i:
@@ -487,8 +527,13 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
             width, st))
         stats = m.get("file_stats") if isinstance(m.get("file_stats"), dict) else {}
         files = m.get("files")
+        roots_txt = _scan_roots_text(m.get("scan_roots") or [])
+        scanned = f"    scanned {roots_txt}" if roots_txt else ""
         if files is None:
-            out.append(("   files   not tracked", "dim"))
+            extra = ("    " + str(m.get("scan_note") or
+                                  "writes outside scanned roots possible"))
+            row = "   files   not tracked" + scanned + extra
+            out.append((U.clip_display(row, max(10, width - 1)), "dim"))
         else:
             pieces = []
             for x in files:
@@ -501,12 +546,10 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
                 pieces.append(name)
             if pieces:
                 text = "  ".join(pieces)
-                room = max(10, width - 11)
-                if U.display_width(text) > room:
-                    text = U.clip_display(text, max(1, room - 1)) + "…"
-                out.append(("   files   " + text, "dim"))
+                row = "   files   " + text + scanned
+                out.append((U.clip_display(row, max(10, width - 1)), "dim"))
             else:
-                out.append(("   files   none", "dim"))
+                out.append(("   files   none" + scanned, "dim"))
         verify = m.get("verify") or {}
         if verify.get("verdict") == "pass":
             detail = str(verify.get("detail") or "").strip()
@@ -1359,6 +1402,8 @@ class App:
                 "status": status, "summary": summary,
                 "findings": rep.get("findings") or [],
                 "files": rep.get("files_changed"),   # None = not tracked
+                "scan_roots": rep.get("scan_roots") or [],
+                "scan_note": rep.get("scan_note") or "",
                 "artifacts": rep.get("artifacts") or [],
                 "issues": rep.get("open_issues") or [],
                 "open_issues": rep.get("open_issues") or [],
@@ -1369,6 +1414,8 @@ class App:
                         if status == "failed" else ""),
                 "run": self.run_id, "turns": self.turns,
                 "agents": self.agent_count, "cost": self.cost,
+                "cost_warn": C.get(self.cfg, "ui.cost_warn", 0.10),
+                "cost_alert": C.get(self.cfg, "ui.cost_alert", 0.50),
                 "duration": (time.time() - self.run_started
                              if self.run_started else None),
                 "saved": str(C.run_dir(self.run_id)) if self.run_id else "",
@@ -1753,7 +1800,7 @@ class App:
                                      / self.work_ctx)))
         cost = (self.cost if (self.running or self.run_id)
                 else (self.session_cost or self.cost))
-        money = (_cost(cost), _cost_style(cost))
+        money = (_cost(cost), _cost_style(cost, cfg=self.cfg))
         if self._palette_active():
             left_parts = [("↑↓ select " + sep + " tab complete", "muted")]
             right_parts = [(f"ctx {ctx}% {sep} ", "muted"), money]

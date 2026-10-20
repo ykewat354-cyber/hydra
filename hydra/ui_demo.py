@@ -58,7 +58,8 @@ def scene_home(cfg, width=54, height=24, glyphs="auto", ui_mode="fullscreen"):
     return _app(cfg, width, height, glyphs, ui_mode)
 
 
-def scene_running(cfg, width=54, height=24, glyphs="auto", ui_mode="fullscreen"):
+def scene_running(cfg, width=54, height=24, glyphs="auto", ui_mode="fullscreen",
+                  cost=None):
     app = _app(cfg, width, height, glyphs, ui_mode, welcome=False)
     app.running = True
     app.run_id = RUN_ID
@@ -69,6 +70,8 @@ def scene_running(cfg, width=54, height=24, glyphs="auto", ui_mode="fullscreen")
     app.tokens_in = 21_400
     app.tokens_out = 2_100
     app.cost = 0.004
+    if cost is not None:
+        app.cost = float(cost)
     app.last_prompt_tokens = 14_880          # ctx 31% of 48k
     app.add_user("add subtract(a,b) to calc.py and test it")
     _tool(app, "read_file", {"path": "calc.py"},
@@ -99,7 +102,7 @@ def scene_running(cfg, width=54, height=24, glyphs="auto", ui_mode="fullscreen")
 
 
 def scene_done(cfg, width=54, height=24, glyphs="auto", ui_mode="fullscreen",
-               variant="done"):
+               variant="done", cost=None):
     app = _app(cfg, width, height, glyphs, ui_mode, welcome=False)
     app.run_id = RUN_ID
     app.last_prompt_tokens = 14_880
@@ -164,6 +167,11 @@ def scene_done(cfg, width=54, height=24, glyphs="auto", ui_mode="fullscreen",
     app.drain()
     app._flash_until = 0            # snapshots stay deterministic
     app._flash_text = ""
+    if cost is not None:
+        app.cost = float(cost)
+        for b in app.blocks:
+            if b.kind == "report":
+                b.meta["cost"] = app.cost
     return app
 
 
@@ -233,7 +241,7 @@ def scene_unicode(cfg, width=54, height=24, glyphs="auto", ui_mode="fullscreen")
 
 
 def build_scene(scene, width=54, height=24, cfg=None, glyphs="auto",
-                ui_mode="fullscreen"):
+                ui_mode="fullscreen", cost=None):
     """Return ``(rows, cursor)``: spans rows from the real renderer."""
     if cfg is None:
         cfg = C.load_config(overrides=[
@@ -244,13 +252,15 @@ def build_scene(scene, width=54, height=24, cfg=None, glyphs="auto",
         ], project_dir=os.getcwd())
     name = str(scene or "home").lower()
     if name == "done":
-        app = scene_done(cfg, width, height, glyphs, ui_mode, "done")
+        app = scene_done(cfg, width, height, glyphs, ui_mode, "done", cost=cost)
     elif name == "partial":
-        app = scene_done(cfg, width, height, glyphs, ui_mode, "partial")
+        app = scene_done(cfg, width, height, glyphs, ui_mode, "partial",
+                         cost=cost)
     elif name == "failed":
-        app = scene_done(cfg, width, height, glyphs, ui_mode, "failed")
+        app = scene_done(cfg, width, height, glyphs, ui_mode, "failed",
+                         cost=cost)
     elif name == "running":
-        app = scene_running(cfg, width, height, glyphs, ui_mode)
+        app = scene_running(cfg, width, height, glyphs, ui_mode, cost=cost)
     elif name == "palette":
         app = scene_palette(cfg, width, height, glyphs, ui_mode)
     elif name == "stream":
@@ -259,6 +269,8 @@ def build_scene(scene, width=54, height=24, cfg=None, glyphs="auto",
         app = scene_unicode(cfg, width, height, glyphs, ui_mode)
     else:
         app = scene_home(cfg, width, height, glyphs, ui_mode)
+    if cost is not None and name not in ("done", "partial", "failed", "running"):
+        app.cost = float(cost)
     rows, cursor = app._compose(int(width), int(height))
     return rows, cursor
 
@@ -310,6 +322,7 @@ def cli(cfg, args, opts=None) -> int:
     glyphs = None
     snapshot = False
     no_color = False
+    cost = None
     i = 0
     args = list(args or [])
     while i < len(args):
@@ -324,6 +337,11 @@ def cli(cfg, args, opts=None) -> int:
             height = int(args[i])
         elif a.startswith("--height="):
             height = int(a.split("=", 1)[1])
+        elif a in ("--cost",) and i + 1 < len(args):
+            i += 1
+            cost = float(args[i])
+        elif a.startswith("--cost="):
+            cost = float(a.split("=", 1)[1])
         elif a == "--ui" and i + 1 < len(args):
             i += 1
             ui_mode = args[i]
@@ -376,7 +394,8 @@ def cli(cfg, args, opts=None) -> int:
               "stream", "unicode"] if scene == "all" else [scene])
     chunks = []
     for name in names:
-        rows, _cursor = build_scene(name, width, height, cfg, glyphs, ui_mode)
+        rows, _cursor = build_scene(name, width, height, cfg, glyphs, ui_mode,
+                                    cost=cost)
         if snapshot:
             chunks.append("\n".join("".join(t for t, _ in r) for r in rows))
         else:

@@ -89,6 +89,8 @@ DEFAULTS: dict = {
         "show_thinking": False,
         "tool_preview_lines": 0,  # 0 = auto (3 narrow / 6 wide)
         "mouse": False,           # fullscreen only
+        "cost_warn": 0.10,        # P2: footer $ turns amber at/above this
+        "cost_alert": 0.50,       # P2: footer $ turns red at/above this
     },
     "daemon": {"poll_secs": 5},
     "park": {"wait_reset": False, "poll_interval": 1800},
