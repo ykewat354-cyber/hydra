@@ -100,6 +100,9 @@ class ToolRobustnessTests(Base):
         try:
             import gc
             import warnings
+            # drain garbage left by earlier test files first: this test must
+            # only judge the resources the background job itself allocates
+            gc.collect()
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 out = self._exec(rt, lead, "bash", {

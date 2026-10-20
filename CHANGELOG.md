@@ -2,6 +2,59 @@
 
 All notable changes to HYDRA. Dates are local (Termux, Android).
 
+## v1.3.0 — 2026-10-20
+
+UI v2 (Work Order #2) complete: inline mode is the default renderer, the phone
+TUI gains its input features, and a frame costs O(live rows) instead of
+O(transcript). M1 (v1.2.4) was the makeover; this release is M2–M4.
+
+### Changed
+
+- **Inline mode is the default** (`ui.mode = inline`). The transcript goes into
+  the terminal's real scrollback and only a live region at the bottom is
+  repainted: no alternate screen, no mouse capture, so Termux keeps native
+  swipe-scroll and long-press copy. Bracketed paste (`?2004h`) and alternate
+  scroll (`?1007h`) stay on and are always restored (`?2004l ?1007l ?25h`) on
+  quit, SIGTERM and SIGHUP. `fullscreen` and `plain` remain selectable via
+  `--ui`, `HYDRA_UI` or `[ui] mode`; fullscreen keeps its alt-screen restore
+  behaviour and its `ui.mouse` opt-in.
+- **Frame budget** — rendered rows are cached per block (a committed block
+  renders once; only live blocks re-render) and the committed prefix is
+  assembled incrementally. Measured on the phone at 54×31 with a 9k-row
+  transcript: p50 1.2 ms, p95 1.8 ms, p99 1.9 ms, ~1.8% CPU at 10 fps
+  (WO2 §5.8 target: p95 ≤ 15 ms, ≤ ~10% CPU). The first (cold) frame over a
+  9k-row history costs ~0.25 s once.
+- `display_width` gained a printable-ASCII fast path (the hottest call in the
+  wrapper).
+
+### Added
+
+- **`@file` mentions** — a palette of files under the working directory (dirs
+  first), matching by path prefix or basename; Tab completes only the mention
+  under the caret; Up/Down preview it. The walk is bounded to 2000 entries,
+  prunes `.git`/`node_modules`/venvs and is cached for 5 s.
+- **`!cmd`** — runs a shell command locally (120 s cap) and reports it as a
+  normal bash card with the real exit code; no API call.
+- **Paste chip** — pastes of 3+ lines (or >400 chars) collapse to a
+  `[pasted N lines]` chip in the composer.
+- **Commands** — `/open [URL]` (termux-open-url, honest fallback), `/expand
+  [N]` / `/collapse` (per-card args + output, shared with Ctrl-T), `/why`
+  (last report + verify verdict + failure reason), `/export [FILE]` (plain
+  transcript, no escapes), `/ui [MODE]` (shows, validates and saves `[ui]
+  mode` to `~/.hydra/config.toml`; applies next launch), `/glyphs` (escape-free
+  tier samples), `/compact` (force compaction); `/agents` is now an alias for
+  `/tree`. Help and key text updated.
+- `tests/test_ui_m3.py` (27 tests), `tests/test_ui_perf.py` (frame budget,
+  render-once, frame↔transcript consistency), inline SIGTERM/SIGHUP restore
+  coverage in the pty suite.
+
+### Fixed
+
+- The `@` file walker closes its `os.walk` iterator explicitly, so a bounded
+  walk can no longer leak a `scandir` iterator (ResourceWarning).
+- Goldens no longer depend on the ambient `~/.hydra/key`: the test config pins
+  a fake key file, so `key ✓ loaded` is deterministic on any machine.
+
 ## v1.2.4 — 2026-10-20
 
 UI v2, milestone 1 (Work Order #2): a calmer, phone-first look on the existing

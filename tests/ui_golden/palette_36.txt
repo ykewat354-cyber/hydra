@@ -1,5 +1,5 @@
                                     
-▌HYDRA 1.2.4 · nemotron-3-super     
+▌HYDRA 1.3.0 · nemotron-3-super     
                                     
  ~/gym_website                      
                                     

@@ -162,6 +162,41 @@ class ExpandTests(Base):
         self.app.handle_command("/collapse")
         self.assertIn("no tool cards yet", self._text())
 
+    def test_collapse_n_collapses_one_card(self):
+        self._tool()
+        self.app.handle_command("/expand 2")
+        self.app.handle_command("/expand")
+        tools = [b for b in self.app.blocks if b.kind == "tool"]
+        self.assertTrue(tools[0].meta.get("expanded"))
+        self.assertTrue(tools[1].meta.get("expanded"))
+        self.app.handle_command("/collapse 2")
+        self.assertFalse(tools[0].meta.get("expanded"))
+        self.assertTrue(tools[1].meta.get("expanded"))
+        self.app.handle_command("/collapse")
+        self.assertFalse(tools[1].meta.get("expanded"))
+
+
+class JobsTests(Base):
+    def test_jobs_without_a_run(self):
+        self.app.handle_command("/jobs")
+        self.assertIn("no background jobs", self._text())
+
+    def test_jobs_lists_state_and_command(self):
+        class Done:
+            def poll(self):
+                return 0
+
+        class RT:
+            jobs = {"j1": {"proc": Done(), "cmd": "echo hi; sleep 1",
+                           "started": time.time() - 3}}
+
+        self.app.rt = RT()
+        self.app.handle_command("/jobs")
+        text = self._text()
+        self.assertIn("j1", text)
+        self.assertIn("exited(0)", text)
+        self.assertIn("echo hi; sleep 1", text)
+
 
 class WhyTests(Base):
     def test_why_on_empty_state(self):

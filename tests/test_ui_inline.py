@@ -286,7 +286,8 @@ class InlinePtyTests(unittest.TestCase):
         vt.feed(buf)
         self.assertEqual(1, vt.count_screen("╭"))
         self.assertEqual(1, vt.count_screen("╰"))
-        self.assertEqual(1, vt.count_screen("HYDRA 1.2"))
+        from hydra import __version__
+        self.assertEqual(1, vt.count_screen(f"HYDRA {__version__}"))
         os.write(master, b"/quit\r")
         buf = self._finish(proc, master, buf)
         self.assertEqual(0, proc.returncode, buf[-800:])
@@ -316,6 +317,23 @@ class InlinePtyTests(unittest.TestCase):
         os.write(master, b"/quit\r")
         buf = self._finish(proc, master, buf)
         self.assertEqual(0, proc.returncode, buf[-800:])
+
+    def _signal_restore(self, sig):
+        proc, master, buf = self._start()
+        os.kill(proc.pid, sig)
+        buf = self._finish(proc, master, buf)
+        self.assertEqual(0, proc.returncode, buf[-800:])
+        self.assertIn(b"\x1b[?2004l", buf)     # bracketed paste off
+        self.assertIn(b"\x1b[?1007l", buf)     # alternate scroll off
+        self.assertIn(b"\x1b[?25h", buf)       # cursor visible again
+        self.assertNotIn(b"\x1b[?1049h", buf)  # never entered the alt screen
+        return buf
+
+    def test_sigterm_restores_the_terminal(self):
+        self._signal_restore(signal.SIGTERM)
+
+    def test_sighup_restores_the_terminal(self):
+        self._signal_restore(signal.SIGHUP)
 
 
 if __name__ == "__main__":

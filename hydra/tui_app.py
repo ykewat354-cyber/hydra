@@ -201,6 +201,19 @@ def _diff_rows(old, new, width: int, limit: int = 4):
     return added, removed, rows
 
 
+def _space_rows(out: list, last_kind, b: Block, rows: list):
+    """Append *rows* with the WO2 inter-block spacing rule."""
+    if not rows:
+        return last_kind
+    quiet = (b.kind in ("tool",) and last_kind == "tool") or \
+            (b.kind in ("notice", "warn", "error")
+             and last_kind in ("notice", "warn", "error"))
+    if out and not quiet:
+        out.append(("", ""))
+    out.extend(rows)
+    return b.kind
+
+
 def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> list:
     """Render one transcript block to a list of ``(text, style)`` rows."""
     width = max(16, int(width))
@@ -590,6 +603,7 @@ COMMANDS = [
     ("/resume", "resume an interrupted run"),
     ("/tree", "agent tree and status"),
     ("/agents", "alias for /tree"),
+    ("/jobs", "background shell jobs"),
     ("/kill", "kill a sub-agent: /kill a2"),
     ("/model", "pin a model: /model [role=]name"),
     ("/models", "role chains"),
@@ -620,7 +634,7 @@ commands
   /copy              copy the last answer or report file to the clipboard
   /open [URL]        open the last served link with the system browser
   /expand [N]        show one tool card's full args/output (N from the end)
-  /collapse          collapse every expanded tool card
+  /collapse [N]      collapse every expanded card (or just the Nth from the end)
   /why               why the last run finished the way it did
   /export [FILE]     write the whole transcript to FILE (plain text)
   /compact           force context compaction now
@@ -628,6 +642,7 @@ commands
   /pause /unpause    pause between turns
   /resume [RUN]      resume an interrupted run
   /tree /agents      agent tree with status and tokens
+  /jobs              background shell jobs
   /kill aN           stop one sub-agent (subtree included)
   /model [role=]m    pin a model first for a role (default lead)
   /models            role chains
@@ -869,7 +884,9 @@ class App:
         idx = self._welcome_idx
         if idx is not None and 0 <= idx < len(self.blocks):
             try:
-                self.blocks[idx].meta["tips"] = False
+                b = self.blocks[idx]
+                b.meta["tips"] = False
+                b.__dict__.pop("_rows", None)   # the lockup shrinks
             except Exception:
                 pass
 
@@ -1418,6 +1435,23 @@ class App:
         self._bump()
 
     # -------------------------------------------------- render
+    def _rows_for(self, b: Block, width: int, live: bool) -> list:
+        """Rendered rows for one block, cached on the block (WO2 §5.8).
+
+        Live blocks change between frames, so they always re-render. Committed
+        blocks are stable unless the width, verbose mode or the expanded flag
+        changes — that tuple is the cache key. (The theme never changes after
+        the first render; the mode does not affect block rows.)"""
+        verbose = self.verbose or bool(b.meta.get("expanded"))
+        if not live:
+            cached = getattr(b, "_rows", None)
+            if cached is not None and cached[0] == (width, verbose):
+                return cached[1]
+        rows = render_block(b, width, self.theme, verbose)
+        if not live:
+            b._rows = ((width, verbose), rows)
+        return rows
+
     def _block_rows(self, width: int) -> list:
         """``[(block, rows)]`` in transcript order, spacing applied.
 
@@ -1425,8 +1459,7 @@ class App:
         out: list = []
         last_kind = None
         for b in self.blocks:
-            rows = render_block(b, width, self.theme,
-                                self.verbose or bool(b.meta.get("expanded")))
+            rows = self._rows_for(b, width, TI.is_live_block(b))
             if not rows:
                 continue
             quiet = (b.kind in ("tool",) and last_kind == "tool") or \
@@ -1437,6 +1470,56 @@ class App:
             out.append((b, rows))
             last_kind = b.kind
         return out
+
+    def _inline_frames(self, width: int):
+        """``(committed_rows, live_rows)`` for inline mode.
+
+        The committed prefix is assembled incrementally and cached, so a frame
+        only pays for the live tail: a 10k-line transcript must not be
+        re-rendered per frame (WO2 §5.8). The blank row *before* the first live
+        block belongs to the committed prefix, exactly like the fullscreen
+        transcript; a streaming answer commits every complete row but its last,
+        unfinished line."""
+        key = (width, self.verbose)
+        st = getattr(self, "_inline_state", None)
+        if st is None or st["key"] != key or st["n"] > len(self.blocks):
+            st = {"key": key, "rows": [], "n": 0, "last": None}
+            self._inline_state = st
+        committed = st["rows"]
+        last_kind = st["last"]
+        extra: list = []          # committed rows that change while streaming
+        live_rows: list = []
+        stopped = False
+        i = st["n"]
+        while i < len(self.blocks):
+            b = self.blocks[i]
+            is_live = TI.is_live_block(b)
+            rows = self._rows_for(b, width, is_live)
+            i += 1
+            if not rows:
+                continue
+            if stopped:
+                last_kind = _space_rows(live_rows, last_kind, b, rows)
+                continue
+            quiet = (b.kind in ("tool",) and last_kind == "tool") or \
+                    (b.kind in ("notice", "warn", "error")
+                     and last_kind in ("notice", "warn", "error"))
+            if is_live:
+                if (committed or extra) and not quiet:
+                    extra.append(("", ""))
+                if b.kind == "assistant" and len(rows) > 1:
+                    extra.extend(rows[:-1])
+                    live_rows.extend(rows[-1:])
+                else:
+                    live_rows.extend(rows)
+                stopped = True
+                last_kind = b.kind
+                continue
+            last_kind = _space_rows(committed, last_kind, b, rows)
+            st["n"], st["last"] = i, last_kind
+        if extra:
+            return committed + extra, live_rows
+        return committed, live_rows
 
     def _transcript_lines(self, width: int) -> list:
         key = (width, self.verbose, self._rev)
@@ -1768,15 +1851,23 @@ class App:
                 "venv", ".mypy_cache", ".pytest_cache", "dist", "build"}
         try:
             base = Path(root)
-            for p in base.rglob("*"):
-                if skip & set(p.parts):
-                    continue
-                rel = str(p.relative_to(base))
-                out.append(rel + "/" if p.is_dir() else rel)
-                if len(out) >= 2000:
-                    break
+            walk = os.walk(base)
+            try:
+                for dirpath, dirnames, filenames in walk:
+                    dirnames[:] = sorted(d for d in dirnames if d not in skip)
+                    rel = os.path.relpath(dirpath, root)
+                    prefix = "" if rel == "." else rel.replace(os.sep, "/") + "/"
+                    for d in dirnames:
+                        out.append(prefix + d + "/")
+                    for f in filenames:
+                        out.append(prefix + f)
+                    if len(out) >= 2000:
+                        break
+            finally:
+                walk.close()      # never leave a scandir iterator for the GC
         except Exception:
             out = []
+        out = out[:2000]
         out.sort(key=lambda s: (not s.endswith("/"), s.lower()))
         self._files_cache = (root, now, out)
         return out
@@ -2448,6 +2539,28 @@ class App:
                 except Exception as exc:
                     self.add_notice(f"tree failed: {exc}", "warn")
             return
+        if cmd == "/jobs":
+            jobs = getattr(self.rt, "jobs", {}) if self.rt is not None else {}
+            if not jobs:
+                self.add_notice("no background jobs")
+                return
+            sep = self.theme.sym("sep")
+            lines = []
+            now = time.time()
+            for jid, job in sorted(jobs.items()):
+                proc = job.get("proc")
+                try:
+                    code = proc.poll() if proc is not None else None
+                except Exception:
+                    code = None
+                state = "running" if code is None else f"exited({code})"
+                age = U.fmt_duration(now - float(job.get("started") or now))
+                cmd_txt = U.end_ellipsis(
+                    " ".join(str(job.get("cmd") or "").split()),
+                    max(8, self.width - 30))
+                lines.append(f"{jid:<4} {state:<10} {age:>6} {sep} {cmd_txt}")
+            self.add_notice("\n".join(lines))
+            return
         if cmd == "/kill":
             if not arg:
                 self.add_notice("usage: /kill aN")
@@ -2590,23 +2703,29 @@ class App:
             if not tools:
                 self.add_notice("no tool cards yet")
                 return
-            if cmd == "/collapse":
+            try:
+                n = max(1, int(arg)) if arg else 0
+            except ValueError:
+                n = 0
+            self._inline_state = None
+            if cmd == "/collapse" and not n:
                 for b in tools:
                     b.meta.pop("expanded", None)
+                    b.__dict__.pop("_rows", None)
                 self.flash("tool cards collapsed", 1.2)
                 self._bump()
                 return
-            try:
-                n = max(1, int(arg)) if arg else 1
-            except ValueError:
+            if cmd == "/expand" and not n:
                 n = 1
             n = min(n, len(tools))
             target = tools[-n]
-            expanded = not target.meta.get("expanded")
+            expanded = (not target.meta.get("expanded")
+                        if cmd == "/expand" else False)
             if expanded:
                 target.meta["expanded"] = True
             else:
                 target.meta.pop("expanded", None)
+            target.__dict__.pop("_rows", None)
             self.flash(f"card {n} from the end "
                        f"{'expanded' if expanded else 'collapsed'}", 1.5)
             self._bump()
@@ -2939,7 +3058,7 @@ class App:
 
         Committed rows are printed once into the terminal's own scrollback;
         only the live region is repainted (WO2 §5.2)."""
-        committed_rows, live_rows = TI.split_blocks(self._block_rows(width))
+        committed_rows, live_rows = self._inline_frames(width)
         max_live = max(2, int(height) - 1)
         if len(live_rows) > max_live:
             # a long live tail would not fit on screen: commit its head

@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.2.4).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 283 stdlib unittest tests plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.2.4 is the UI v2 makeover (Work Order #2, M1): compact lockup, semantic colours, glyph tiers, honest closing cards, real cursor, no mouse capture, `hydra ui-demo`. v1.2.3 added partial/cap file reporting (including shell writes), a turn-cap finish nudge, Hinglish "fir/phir" handling, and a stricter website-3D skill.
+> **Status: implemented (v1.3.0).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 331 stdlib unittest tests (176 subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. v1.3.0 completes UI v2 (Work Order #2): inline mode is the default renderer (native scrollback, no mouse capture), `@file`/`!shell` input, `/open /expand /collapse /why /export /ui /glyphs`, and a per-frame cost that is O(live rows) instead of O(transcript) — p95 1.8 ms at 54×31 with a 9k-row transcript. v1.2.4 was the UI v2 makeover (M1): compact lockup, semantic colours, glyph tiers, honest closing cards, real cursor, `hydra ui-demo`. v1.2.3 added partial/cap file reporting (including shell writes), a turn-cap finish nudge, Hinglish "fir/phir" handling, and a stricter website-3D skill.
 
 ### Install (one line)
 
@@ -21,6 +21,12 @@ curl -fsSL https://raw.githubusercontent.com/ykewat354-cyber/hydra/main/install-
 That clones/updates `~/hydra`, installs `$PREFIX/bin/hydra`, and runs `hydra doctor`.
 Then: `hydra models probe` → `hydra` (opens the TUI) or `hydra "your task"`.
 
+**v1.3.0 (UI v2, M2–M4):** inline mode is the default — the transcript lives in
+the terminal's real scrollback and only a live region repaints, so native
+swipe-scroll, long-press copy and bracketed paste keep working; `@file`
+completion, `!shell`, `[pasted N lines]`, `/open /expand /collapse /why
+/export /ui /glyphs`; committed rows render once (p95 1.8 ms at 54×31 with a
+9k-row transcript). `fullscreen`/`plain` remain selectable.
 **v1.2.4 (UI v2, M1):** compact 3-row lockup, semantic colours/glyph tiers,
 live status line, tool cards with diffs, honest closing cards, real cursor at
 the caret, mouse capture off by default, `hydra ui-demo`.

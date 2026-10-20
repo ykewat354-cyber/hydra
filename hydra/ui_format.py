@@ -25,7 +25,13 @@ def char_width(ch: str) -> int:
 
 
 def display_width(text: str) -> int:
-    return sum(char_width(ch) for ch in str(text))
+    text = str(text)
+    # fast path: printable ASCII is one cell per char. This is the hottest
+    # loop in the renderer (every wrapped line, every frame) and
+    # str.isascii()/isprintable() run in C.
+    if text.isascii() and text.isprintable():
+        return len(text)
+    return sum(char_width(ch) for ch in text)
 
 
 def clip_display(text: str, width: int) -> str:
