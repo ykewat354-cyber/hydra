@@ -10,7 +10,7 @@ Many heads, one loop: a lead agent that spawns sub-agents, routes every job to t
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.3.1, WO3).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 405 stdlib tests (176 subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. Work Order #3 makes reports trustworthy (honest `files_changed`, claim-aware verification, one-port servers, child-file merging), caps verifier cost, measures prompted JSON obedience, and sharpens bench diffs. The task-focus hotfix remains in this release: the task is pinned first, `$HOME` is not a project, and `/new <task>` stops an active run. v1.3.0 completes UI v2 (Work Order #2): inline mode is the default renderer (native scrollback, no mouse capture), `@file`/`!shell` input, `/open /expand /collapse /why /export /ui /glyphs`, and a per-frame cost that is O(live rows) instead of O(transcript) — p95 1.8 ms at 54×31 with a 9k-row transcript. v1.2.4 was the UI v2 makeover (M1): compact lockup, semantic colours, glyph tiers, honest closing cards, real cursor, `hydra ui-demo`. v1.2.3 added partial/cap file reporting (including shell writes), a turn-cap finish nudge, Hinglish "fir/phir" handling, and a stricter website-3D skill.
+> **Status: implemented (v1.3.2, WO3.1 patch).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 405+ stdlib tests (176+ subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. WO3 made reports trustworthy (honest `files_changed`, claim-aware verification, one-port servers, child-file merging), capped verifier cost, measured prompted JSON obedience, and sharpened bench diffs. WO3.1 closes six gaps: a real-model smoke of the trust path, threshold cost colours, `scan_roots` on the card, exact-output prompt + skill, immutable tags with `hydra update` printing the landed tag, and a `hydra footprint` table that adds up.
 
 ### Install (one line)
 
@@ -567,6 +567,17 @@ Types: `run_start · agent_spawn · model_request · model_response · tool_call
 3. Agents `done` keep their reports; `running`/`waiting` agents re-enter the loop; orphaned children are re-attached to their parents.
 4. Background jobs: check the PID in `/proc/<pid>`; mark `lost` if gone.
 5. Re-probe models if the run was parked, then continue.
+
+**`scan_complete` ka matlab (exact meaning, v1.3.2).** `scan_complete=true`
+means only that every chosen root directory was scanned within the budget
+without truncation — it is **not** proof that every write was observed. The
+report also carries `scan_roots` (the directories actually scanned) and the
+closing card prints them muted, e.g. `files   js/app.js +1    scanned ~/site`.
+If a shell/interpreter command names an absolute or `~` path outside those
+roots, the harness either adds that directory to the roots (file reported) or
+returns `files_changed=null` with `scan_complete=false` and the note `writes
+outside scanned roots possible`; it never returns `[]` with
+`scan_complete=true` in that case.
 
 **Optional checkpoints (non-blocking, default off):** `journal.git_snapshots = true` auto-commits the working directory (if it is a git repo) at turn boundaries with no prompts, enabling `hydra undo`. It never blocks or vetoes an action.
 

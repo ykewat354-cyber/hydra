@@ -335,6 +335,13 @@ def collect(agent, explicit=None) -> dict:
     cwd = Path(getattr(agent, "workdir", os.getcwd()))
     seen: list = []
     roots: list = []
+    outside_possible = False
+
+    def _named(raw: str) -> bool:
+        """True for an absolute or ``~`` path: relative paths are ambiguous."""
+        s = str(raw or "").strip()
+        return s.startswith("/") or s.startswith("~")
+
     for raw in (explicit or []):
         p = _expand(raw, cwd)
         if p is None:
@@ -342,6 +349,8 @@ def collect(agent, explicit=None) -> dict:
         r = _root_for(p, cwd)
         if r is not None:
             roots.append(r)
+        elif _named(raw):
+            outside_possible = True
         if p.is_dir():
             continue
         seen.append(str(raw))
@@ -352,6 +361,8 @@ def collect(agent, explicit=None) -> dict:
         r = _root_for(p, cwd)
         if r is not None:
             roots.append(r)
+        elif _named(raw):
+            outside_possible = True
         if p.is_dir():
             continue
         if str(raw) not in seen:
@@ -374,6 +385,11 @@ def collect(agent, explicit=None) -> dict:
                 r = _root_for(p, cwd)
                 if r is not None:
                     roots.append(r)
+                elif _named(raw):
+                    # P3: interpreter/shell write outside the scannable roots
+                    # (an absolute or ~ path whose nearest existing dir is
+                    # $HOME or /).  The scan cannot honestly claim coverage.
+                    outside_possible = True
                 if p.is_dir() or not p.exists():
                     # Relative shell paths are ambiguous (``cd ~/proj && > x``):
                     # never invent a file that is not there; the scan root still
@@ -387,23 +403,28 @@ def collect(agent, explicit=None) -> dict:
     since = float(getattr(agent, "started_at", 0) or 0)
     scan = scan_writes(cwd, since, marker=marker, roots=roots,
                        cfg=getattr(agent, "cfg", None))
-    complete = bool(scan["complete"]) and not child_null
+    complete = bool(scan["complete"]) and not child_null and not outside_possible
     method_parts = []
     if seen or child_files:
         method_parts.append("tool")
     if scan["roots"]:
         method_parts.append("scan")
     method = "mixed" if len(method_parts) > 1 else (method_parts[0] if method_parts else "scan")
+    scan_roots = [str(r) for r in scan.get("roots") or []]
     if not complete:
+        reason = scan.get("reason") or ("child-not-tracked" if child_null else "")
+        if outside_possible and not reason:
+            reason = "writes outside scanned roots possible"
+        elif outside_possible:
+            reason = reason + "; writes outside scanned roots possible"
         return {"files": None, "method": method, "complete": False,
-                "reason": scan.get("reason") or ("child-not-tracked" if child_null else ""),
-                "scan": scan}
+                "reason": reason, "scan_roots": scan_roots, "scan": scan}
     files = []
     for raw in seen + child_files + list(scan["files"]):
         if raw and raw not in files:
             files.append(raw)
     return {"files": files, "method": method, "complete": True,
-            "reason": "", "scan": scan}
+            "reason": "", "scan_roots": scan_roots, "scan": scan}
 
 
 _WRITE_CMD = re.compile(

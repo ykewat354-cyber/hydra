@@ -606,6 +606,7 @@ class Agent:
             "files_changed": scanned.get("files"),
             "files_changed_method": scanned.get("method") or "scan",
             "scan_complete": bool(scanned.get("complete")),
+            "scan_roots": [str(x) for x in (scanned.get("scan_roots") or [])],
             "commands_run": [str(x) for x in (commands_run or [])],
             "findings": [str(x) for x in (findings or [])],
             "open_issues": [str(x) for x in (open_issues or [])],
@@ -628,10 +629,13 @@ class Agent:
                 rep["files_changed"] = res.get("files")
                 rep["files_changed_method"] = res.get("method") or "scan"
                 rep["scan_complete"] = bool(res.get("complete"))
+                rep["scan_roots"] = [str(x) for x in
+                                     (res.get("scan_roots") or [])]
             except Exception:
                 rep = dict(rep)
                 rep["files_changed"] = None
                 rep["scan_complete"] = False
+                rep["scan_roots"] = []
         return rep
 
     # -------------------------------------------------- stall detection
