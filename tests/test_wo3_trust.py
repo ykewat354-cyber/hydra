@@ -95,6 +95,24 @@ class FilesChangedTests(unittest.TestCase):
         self.assertEqual(rep["files"], ["proj/js.js"])
         self.assertNotIn(str(fake_home), rep["scan"]["roots"])
 
+    def test_tee_path_finds_project_from_home(self):
+        fake_home = self.tmp / "home2"
+        proj = fake_home / "proj"
+        proj.mkdir(parents=True)
+        since = time.time()
+        a = agent_for(fake_home)
+        a.data["files_marker"] = str(marker(fake_home, since))
+        a.messages = [{"role": "assistant", "tool_calls": [{"function": {
+            "name": "bash", "arguments": {
+                "cmd": "printf x | tee proj/app.js >/dev/null"}}}]}]
+        (proj / "app.js").write_text("x")
+        with mock.patch.dict(os.environ, {"HOME": str(fake_home)}), \
+                mock.patch("pathlib.Path.home", return_value=fake_home):
+            rep = A.collect(a, [])
+        self.assertTrue(rep["complete"], rep)
+        self.assertEqual(rep["files"], ["proj/app.js"], rep)
+        self.assertNotIn(str(fake_home), rep["scan"]["roots"])
+
     def test_truncated_scan_is_null_not_empty(self):
         since = time.time()
         a = agent_for(self.proj, cfg_=cfg(report={"scan_max_entries": 1}))

@@ -40,8 +40,8 @@ _PRUNE_NAMES = (
 
 _ABS_PATH = re.compile(r"(?:(?<=^)|(?<=[\s'\"=:;,(`]))(~?/[^\s'\"`;|&<>()]+)")
 _REL_REDIRECT = re.compile(
-    r"(?:>>?|\btee(?:\s+-a)?|\bcp\s+[^\s;|&]+\s+|\bmv\s+[^\s;|&]+\s+)"
-    r"([^\s'\"`;|&<>()]+)")
+    r"(?:>>?|\btee(?:\s+-a)?\s+|\bcp\s+[^\s;|&]+\s+|"
+    r"\bmv\s+[^\s;|&]+\s+)\s*([^\s'\"`;|&<>()]+)")
 _QUOTED_FILE = re.compile(
     r"['\"]([^'\"\n]{1,240}?\.(?:html?|css|m?js|cjs|jsx|tsx?|json|md|txt|sh|"
     r"toml|ya?ml|xml|svg|py|rs|go|java|c|h|cpp|sql))['\"]", re.I)
@@ -374,7 +374,10 @@ def collect(agent, explicit=None) -> dict:
                 r = _root_for(p, cwd)
                 if r is not None:
                     roots.append(r)
-                if p.is_dir() or (not p.exists() and not p.suffix):
+                if p.is_dir() or not p.exists():
+                    # Relative shell paths are ambiguous (``cd ~/proj && > x``):
+                    # never invent a file that is not there; the scan root still
+                    # catches the real path when it exists.
                     continue
                 if str(raw) not in seen:
                     seen.append(str(raw))
