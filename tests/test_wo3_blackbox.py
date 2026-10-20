@@ -125,6 +125,78 @@ class Blackbox(unittest.TestCase):
         jobs = rep.get("jobs") or []
         self.assertEqual(len(jobs), 1, rep)
         self.assertIn(str(port), str(jobs[0].get("url") or ""))
+        self.assertTrue(str(rep.get("served_url") or "").startswith(
+            f"http://127.0.0.1:{port}"), rep)
+        self.assertTrue([e for e in events if e.get("type") == "served_probe"
+                         and int(e.get("status") or 0) == 200], events[-20:])
+
+    def test_a4_served_url_survives_stopping_the_job(self):
+        # P1 regression: the agent may stop the server before finish.  HYDRA's
+        # own bounded GET at job_start must still put served_url in the report.
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        cmd = f"timeout 30 python -m http.server {port}"
+        script = [{
+            "content": "starting the server",
+            "tool_calls": [{"function": {"name": "bash", "arguments": {
+                "cmd": cmd, "background": True}}}],
+        }, {
+            "content": "stopping it before finish",
+            "tool_calls": [{"function": {"name": "job_kill", "arguments": {
+                "id": "j1"}}}],
+        }, {
+            "content": "done",
+            "tool_calls": [{"function": {"name": "finish", "arguments": {
+                "status": "done",
+                "summary": f"Served the site on http://127.0.0.1:{port} — HTTP 200."}}}],
+        }, {"content": '{"verdict":"pass","issues":[]}'}]
+        _p, rep, events = self.run_cli(
+            "Serve the site on one port, check it returns 200, then finish",
+            script)
+        self.assertTrue(str(rep.get("served_url") or "").startswith(
+            f"http://127.0.0.1:{port}"), rep)
+        probes = [e for e in events if e.get("type") == "served_probe"
+                  and int(e.get("status") or 0) == 200]
+        self.assertTrue(probes, events[-20:])
+        jobs = rep.get("jobs") or []
+        self.assertEqual(len(jobs), 1, rep)
+        self.assertEqual("exited", jobs[0].get("state"), rep)
+
+    def test_a4_shell_ampersand_server_is_tracked(self):
+        # P1/A4: models often write ``python -m http.server 8080 &`` without
+        # background=true; the harness must still create a tracked job.
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        cmd = f"timeout 30 python3 -m http.server {port} > /dev/null 2>&1 &"
+        script = [{
+            "content": "starting the server",
+            "tool_calls": [{"function": {"name": "bash", "arguments": {
+                "cmd": cmd}}}],
+        }, {
+            "content": "checking it",
+            "tool_calls": [{"function": {"name": "bash", "arguments": {
+                "cmd": f"sleep 1; curl -s -o /dev/null -w '%{{http_code}}' "
+                       f"http://127.0.0.1:{port}/"}}}],
+        }, {
+            "content": "done",
+            "tool_calls": [{"function": {"name": "finish", "arguments": {
+                "status": "done",
+                "summary": f"Served on http://127.0.0.1:{port} — HTTP 200."}}}],
+        }, {"content": '{"verdict":"pass","issues":[]}'}]
+        _p, rep, events = self.run_cli(
+            "Serve the site on one port, check it returns 200, then finish",
+            script)
+        starts = [e for e in events if e.get("type") == "job_start"]
+        self.assertEqual(len(starts), 1, events[-10:])
+        self.assertEqual(int(starts[0].get("port") or 0), port, starts)
+        jobs = rep.get("jobs") or []
+        self.assertEqual(len(jobs), 1, rep)
+        self.assertTrue(str(rep.get("served_url") or "").startswith(
+            f"http://127.0.0.1:{port}"), rep)
 
     # ---------------------------------------------------------------- A1
     def test_a1_files_changed_with_20k_home_files(self):
@@ -160,6 +232,39 @@ class Blackbox(unittest.TestCase):
         self.assertIn(rep.get("files_changed_method"), ("scan", "mixed"))
         self.assertFalse([f for f in files if ".hydra" in f or "junk/" in f])
         self.assertLess(elapsed, 60)
+
+    # ---------------------------------------------------------------- P3
+    def _outside_write_run(self):
+        cmd = ("python -c \"open('~/other/x.txt','w').write('x')\"")
+        script = [
+            {"content": "writing outside the cwd",
+             "tool_calls": [{"function": {"name": "bash",
+                                          "arguments": {"cmd": cmd}}}]},
+            {"content": "done",
+             "tool_calls": [{"function": {"name": "finish", "arguments": {
+                 "status": "done", "summary": "wrote ~/other/x.txt"}}}]},
+        ]
+        return self.run_cli("write ~/other/x.txt with python", script,
+                            cwd=self.work, verify="never")
+
+    def test_p3_outside_root_write_is_reported_or_honest_null(self):
+        # ~/other does not exist: the root walk reaches $HOME (never scanned),
+        # so the honest answer is null + a note, not [] + complete=true.
+        _p, rep, _evs = self._outside_write_run()
+        files = rep.get("files_changed")
+        self.assertIsNone(files, rep)
+        self.assertFalse(rep.get("scan_complete"))
+        self.assertIn("outside", str(rep.get("scan_note") or ""))
+
+    def test_p3_outside_root_write_is_reported_when_parent_exists(self):
+        (self.home / "other").mkdir()
+        _p, rep, _evs = self._outside_write_run()
+        files = rep.get("files_changed")
+        self.assertIsInstance(files, list, rep)
+        self.assertTrue(rep.get("scan_complete"), rep)
+        self.assertTrue(any("other/x.txt" in str(f) for f in files), rep)
+        self.assertTrue(any(str(self.home / "other") in str(r)
+                            for r in (rep.get("scan_roots") or [])), rep)
 
     # ---------------------------------------------------------------- A2
     def test_a2_removed_claim_on_js_only_change_passes(self):

@@ -10,7 +10,9 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from . import Tool
@@ -183,6 +185,14 @@ def _tool_bash(args, ctx) -> str:
         cwd = ctx.cwd / cwd
     if args.get("background"):
         return _background(ctx, cwd, cmd)
+    # P1/A4: a single-line server started with a shell ``&`` (the pattern
+    # weak models use) must still become a tracked job, otherwise the
+    # one-port rule and served_url have nothing to work with.
+    plain = cmd.strip()
+    if plain.endswith("&") and "\n" not in plain:
+        body = plain[:-1].rstrip()
+        if body and _server_port(body):
+            return _background(ctx, cwd, body)
     return run_shell(ctx.rt, cwd, cmd, timeout, stdin_text=args.get("stdin"))
 
 
@@ -237,6 +247,32 @@ def _job_alive(job) -> bool:
         return job.get("proc") is not None and job["proc"].poll() is None
     except Exception:
         return False
+
+
+def _probe_served(rt, jid: str, url: str, *, timeout: float = 5.0) -> bool:
+    """P1/A4: one bounded HYDRA GET while the job is starting.
+
+    A 200 is journaled as ``served_probe`` and stored on the job, giving the
+    report a ``served_url`` that HYDRA itself observed even if the agent stops
+    the server before ``finish``.  No response (or a non-200) simply leaves it
+    unset.  Returns True on a 200.
+    """
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.0) as resp:
+                if int(getattr(resp, "status", 0) or 0) == 200:
+                    job = (getattr(rt, "jobs", {}) or {}).get(jid)
+                    if isinstance(job, dict):
+                        job["served_url"] = url
+                    if getattr(rt, "journal", None) is not None:
+                        rt.journal.event("served_probe", None, jid=jid,
+                                         url=url, status=200)
+                    return True
+        except Exception:
+            pass
+        time.sleep(0.4)
+    return False
 
 
 def _background(ctx, cwd: Path, cmd: str) -> str:
@@ -305,6 +341,15 @@ def _background(ctx, cwd: Path, cmd: str) -> str:
     started = f"started job {jid} (pid {proc.pid}); log: {log}"
     if meta["url"]:
         started += f"; url: {meta['url']}"
+        if _probe_served(rt, jid, meta["url"], timeout=1.5):
+            started += "; hydra GET: HTTP 200"
+        else:
+            try:
+                threading.Thread(
+                    target=_probe_served, args=(rt, jid, meta["url"]),
+                    kwargs={"timeout": 8.0}, daemon=True).start()
+            except Exception:
+                pass
     return started + note
 
 

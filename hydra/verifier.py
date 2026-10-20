@@ -641,7 +641,8 @@ def _server_jobs(agent) -> list:
             alive = False
         out.append({"id": str(jid), "port": int(port),
                     "url": job.get("url") or f"http://127.0.0.1:{port}/",
-                    "state": "running" if alive else "exited"})
+                    "state": "running" if alive else "exited",
+                    "served_url": str(job.get("served_url") or "")})
     return out
 
 
@@ -728,6 +729,13 @@ def audit_claims(agent) -> dict:
             if _live_get(job["url"]) == 200:
                 served_url = job["url"]
             break
+    if not served_url:
+        # P1/A4: HYDRA probed the job URL right after job_start; use that
+        # bounded, real GET even if the agent stopped the server before finish.
+        for job in reversed(jobs):
+            if job.get("served_url"):
+                served_url = str(job["served_url"])
+                break
     return {"issues": issues[:8], "evidence": sorted(set(evidence)),
             "served_url": served_url, "claims": claims, "jobs": jobs}
 
