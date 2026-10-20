@@ -6,6 +6,37 @@ All notable changes to HYDRA. Dates are local (Termux, Android).
 > hotfix (`62a5a5a`). WO3's final commit now carries the `v1.3.1` tag; the
 > hotfix is preserved as `v1.3.1-taskfocus`.
 
+## v1.3.2 — WO3.1 patch (2026-10-20)
+
+Closes six trust gaps left by WO3. No new features; behaviour stays
+Ollama-Cloud-only.
+
+> **Tag rule (2026-10-20):** published tags are **immutable**. Never move,
+> delete or force-push a tag; ship fixes under a new version. `v1.3.1`
+> (`c630220`) and `v1.3.1-taskfocus` (`62a5a5a`) stay exactly as published.
+
+### Added / Fixed
+
+- **P1 real smoke.** HYDRA now performs its own bounded GET when a server job
+  starts (and when a server is started with a trailing shell `&`), so
+  `served_url` is real evidence even when the agent stops the server before
+  `finish`.
+- **P2 cost thresholds (P1).** The footer `$` is normal below
+  `[ui] cost_warn` (default `0.10`), amber from there, red from
+  `[ui] cost_alert` (`0.50`). `hydra ui-demo done --cost N` (and `running`)
+  previews the colours with no spend.
+- **P3 `scan_roots`.** The report carries the directories actually scanned and
+  the closing card prints them muted (`files  js/app.js +1  scanned ~/site`).
+  An absolute/`~` write outside those roots is either added as a root or turns
+  `files_changed` into an honest `null` with `scan_complete=false` and the
+  note `writes outside scanned roots possible`; never `[]` + `true`.
+- **P4 exact-output guidance.** ≤3 lines in the lead prompt plus the on-demand
+  `exact-output` skill (TODO list, CSV, JSON pipelines with `diff` checks).
+- **P5 release hygiene.** `hydra update` prints the tag it landed on.
+- **P6 `hydra footprint`.** A table that lists every pinned-prompt part
+  (system, env, workspace, recent runs, project instructions, skills, tools,
+  message framing) so the rows sum to `pinned_tokens`.
+
 ## v1.3.1 — WO3 Trust and Cost (2026-10-20)
 
 Makes the report match reality: what changed, what was verified, what a server

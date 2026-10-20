@@ -11,7 +11,7 @@ Added subtract(a, b) to calc.py and
 ran the tests.                      
                                     
  ✓ Done       6 turns · 14s · $0.004
-   files   calc.py +4  test_calc.py…
+   files   calc.py +4  test_calc.py 
    verify  pass · tests ran 3/3     
    open    http://127.0.0.1… (/open)
    run     r_demo_1405              

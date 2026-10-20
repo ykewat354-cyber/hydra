@@ -235,7 +235,8 @@ class Blackbox(unittest.TestCase):
 
     # ---------------------------------------------------------------- P3
     def _outside_write_run(self):
-        cmd = ("python -c \"open('~/other/x.txt','w').write('x')\"")
+        cmd = ("python -c \"import os; "
+               "open(os.path.expanduser('~/other/x.txt'),'w').write('x')\"")
         script = [
             {"content": "writing outside the cwd",
              "tool_calls": [{"function": {"name": "bash",

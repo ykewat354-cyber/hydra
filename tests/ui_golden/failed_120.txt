@@ -1,7 +1,7 @@
 ❯ summarise the repo                                                                     │AGENTS                        
                                                                                          │  (none yet)                  
  ✗ Failed                                                           2 turns · 9s · $0.001│                              
-   files   not tracked                                                                   │RUN                           
+   files   not tracked    writes outside scanned roots possible                          │RUN                           
    why     401 invalid key — run hydra doctor                                            │r_demo_1405                   
    run     r_demo_1405                                                                   │2 turns · $0.001              
                                                                                          │nemotron-3-super              

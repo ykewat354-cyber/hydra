@@ -33,6 +33,16 @@ def _tail(text: str, lines: int = 20) -> str:
     return "\n".join(rows[-lines:])
 
 
+def _tag_at(root: Path, sha: str) -> str:
+    """P5: the most specific tag describing *sha* ('' when none)."""
+    for args in (["describe", "--tags", "--exact-match", sha],
+                 ["describe", "--tags", sha]):
+        res = _git(root, *args)
+        if res.returncode == 0:
+            return (res.stdout or "").strip()
+    return ""
+
+
 def perform_update(root=None, test_cmd=None, out=print) -> int:
     """Pull, show old..new, test, and hard-reset on test failure."""
     root = Path(root or install_dir()).expanduser().resolve()
@@ -60,6 +70,7 @@ def perform_update(root=None, test_cmd=None, out=print) -> int:
     new_sha = new.stdout.strip()
     if old_sha == new_sha:
         out(f"already up to date ({new_sha[:12]})")
+        out(f"tag: {_tag_at(root, new_sha) or '(none)'}")
         return 0
 
     log = _git(root, "log", "--oneline", "--no-decorate",
@@ -91,6 +102,7 @@ def perform_update(root=None, test_cmd=None, out=print) -> int:
         return 1
 
     out(f"tests passed — updated {old_sha[:12]} -> {new_sha[:12]}")
+    out(f"tag: {_tag_at(root, new_sha) or '(none)'}")
     return 0
 
 
