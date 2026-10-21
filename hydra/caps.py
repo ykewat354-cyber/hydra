@@ -140,12 +140,22 @@ def _probe_web_fetch(client) -> bool:
         return True
 
 
+def _configured_vision(cfg):
+    chain = list(C.get(cfg, "roles.vision.chain") or [])
+    return str(chain[0]) if chain else None
+
+
 def _probe_vision(cfg: dict, client) -> tuple:
-    """(available, model) — empty/missing tags fail open."""
+    """(available, model) — missing/unsupported tags fail open.
+
+    W5-1: an OpenAI-compatible endpoint may not implement ``/models``.  In
+    that case the configured vision role is the fallback; we do not hide
+    view_image just because discovery is unavailable.
+    """
     try:
         tags = client.tags()
     except Exception:
-        return True, None
+        return True, _configured_vision(cfg)
     names = set()
     for item in tags or []:
         if isinstance(item, dict):
@@ -154,7 +164,7 @@ def _probe_vision(cfg: dict, client) -> tuple:
             names.add(str(item))
     names.discard("")
     if not names:
-        return True, None
+        return True, _configured_vision(cfg)
     for model in (C.get(cfg, "roles.vision.chain") or []):
         if str(model) in names:
             return True, str(model)

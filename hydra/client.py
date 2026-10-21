@@ -123,6 +123,8 @@ def classify(status: int, body: str, model: str, retry_after=None) -> ApiError:
 # ---------------------------------------------------------------- client
 
 class OllamaCloud:
+    protocol = "ollama"
+
     def __init__(self, host: str, key: str, connect_timeout: float = 15,
                  idle_timeout: float = 90):
         self.host = host.rstrip("/")
@@ -462,3 +464,377 @@ class OllamaCloud:
             except Exception:
                 continue
         return None
+
+
+# ---------------------------------------------------------------- OpenAI-compatible
+
+class OpenAiClient(OllamaCloud):
+    """OpenAI-compatible chat transport (OpenRouter, Groq, llama.cpp, ...).
+
+    The pooled connection and error classification are inherited from
+    ``OllamaCloud``.  Only the wire shape differs: ``POST {base}/chat/completions``,
+    SSE ``data:`` frames, and OpenAI tool-call deltas.
+    """
+
+    protocol = "openai"
+
+    def __init__(self, host: str, key: str, connect_timeout: float = 15,
+                 idle_timeout: float = 90):
+        super().__init__(host, key, connect_timeout, idle_timeout)
+        parts = urlsplit(self.host)
+        self._base_path = (parts.path or "").rstrip("/")
+
+    def _api_path(self, suffix: str) -> str:
+        suffix = "/" + str(suffix).lstrip("/")
+        return (self._base_path + suffix) or suffix
+
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"Bearer {self.key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream, application/json",
+            "Connection": "keep-alive",
+            "User-Agent": "hydra/1.0 (termux)",
+        }
+
+    @staticmethod
+    def _args_value(value):
+        """Keep arguments as JSON text on the wire, as OpenAI expects."""
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value if value is not None else {}, ensure_ascii=False)
+        except Exception:
+            return "{}"
+
+    @classmethod
+    def _convert_messages(cls, messages: list) -> list:
+        """Translate HYDRA's Ollama-shaped transcript to OpenAI messages.
+
+        HYDRA stores tool calls as ``{"function": {name, arguments: dict}}`` and
+        tool results as ``{"role": "tool", "tool_name": ...}``.  OpenAI wants
+        string arguments, an id on every call, and a matching ``tool_call_id``
+        on every tool result.  The order is stable (one assistant turn followed
+        by its results), so a small pending queue is enough.
+        """
+        out: list = []
+        pending: list = []
+        for m in messages or []:
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "user")
+            if role == "assistant":
+                msg = {"role": "assistant",
+                       "content": m.get("content") or ""}
+                calls = []
+                for i, tc in enumerate(m.get("tool_calls") or []):
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
+                    name = str(fn.get("name") or "")
+                    if not name:
+                        continue
+                    cid = str(tc.get("id") or f"call_{len(out)}_{i}")
+                    calls.append({"id": cid, "type": "function",
+                                  "function": {"name": name,
+                                               "arguments": cls._args_value(
+                                                   fn.get("arguments"))}})
+                    pending.append(cid)
+                if calls:
+                    msg["tool_calls"] = calls
+                out.append(msg)
+                continue
+            if role == "tool":
+                cid = pending.pop(0) if pending else "call_unknown"
+                out.append({"role": "tool", "tool_call_id": cid,
+                            "content": str(m.get("content") or "")})
+                continue
+            # A non-tool message closes any dangling result window.
+            pending = []
+            out.append({"role": role, "content": m.get("content") or ""})
+        return out
+
+    @staticmethod
+    def _usage(data) -> tuple:
+        if not isinstance(data, dict):
+            return 0, 0
+        u = data.get("usage") if isinstance(data.get("usage"), dict) else data
+        try:
+            return (int(u.get("prompt_tokens") or u.get("input_tokens") or 0),
+                    int(u.get("completion_tokens") or u.get("output_tokens") or 0))
+        except (TypeError, ValueError):
+            return 0, 0
+
+    @staticmethod
+    def _normalise_calls(calls: dict) -> list:
+        out = []
+        for idx in sorted(calls):
+            item = calls[idx]
+            fn = item.get("function") or {}
+            raw = fn.get("arguments") or ""
+            try:
+                args = json.loads(raw) if isinstance(raw, str) else raw
+            except Exception:
+                args = raw
+            if not isinstance(args, (dict, list)):
+                args = {"_raw": args} if args not in (None, "") else {}
+            out.append({"id": item.get("id") or f"call_{idx}",
+                        "type": "function",
+                        "function": {"name": fn.get("name") or "", "arguments": args}})
+        return [c for c in out if c["function"]["name"]]
+
+    def _payload(self, model, messages, tools, think, options, stream, format):
+        payload = {"model": model, "messages": self._convert_messages(messages),
+                   "stream": bool(stream)}
+        if stream:
+            # Standard OpenAI extension: the final SSE frame carries usage.
+            # Servers that do not know it simply ignore the field.
+            payload["stream_options"] = {"include_usage": True}
+        if tools:
+            payload["tools"] = list(tools)
+        opts = options or {}
+        if "temperature" in opts:
+            payload["temperature"] = opts["temperature"]
+        if "num_predict" in opts:
+            payload["max_tokens"] = opts["num_predict"]
+        if "top_p" in opts:
+            payload["top_p"] = opts["top_p"]
+        # Ollama's `think` has no portable OpenAI equivalent; never send it.
+        if format:
+            if isinstance(format, dict) and format.get("type") in ("json_object",
+                                                                   "json_schema"):
+                payload["response_format"] = format
+            else:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "hydra_response", "schema": format},
+                }
+        return payload
+
+    @staticmethod
+    def _delta_text(value) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            bits = []
+            for part in value:
+                if isinstance(part, dict):
+                    bits.append(str(part.get("text") or part.get("content") or ""))
+                elif part:
+                    bits.append(str(part))
+            return "".join(bits)
+        return str(value or "")
+
+    def chat(self, model: str, messages: list, tools=None, think=None,
+             options=None, stream: bool = True, on_delta=None, format=None) -> Reply:
+        self._check_cancel()
+        payload = self._payload(model, messages, tools, think, options,
+                                stream, format)
+        path = self._api_path("/chat/completions")
+        conn = self._get_connection()
+        started = time.time()
+        prefix = httpdebug.prefix_hash(messages, tools) if self.http_log is not None else None
+        status, ttfb, req_bytes, resp_bytes = 0, None, 0, 0
+        headers, error_body, got_resp, reusable = None, None, False, False
+        try:
+            body = json.dumps(payload, ensure_ascii=False)
+            if self.redact is not None:
+                body = self.redact(body)
+            body = body.encode()
+            req_bytes = len(body)
+            conn = self._request(conn, "POST", path, body)
+            resp = conn.getresponse()
+            got_resp = True
+            status = resp.status
+            ttfb = int((time.time() - started) * 1000)
+            headers = httpdebug.pick_headers(resp)
+            if resp.status >= 400:
+                raw = resp.read().decode("utf-8", "replace")
+                resp_bytes = len(raw.encode("utf-8", "replace"))
+                reusable = not getattr(resp, "will_close", False)
+                if self.redact is not None:
+                    raw = self.redact(raw)
+                error_body = raw
+                retry_after = None
+                ra = resp.getheader("Retry-After")
+                if ra:
+                    try:
+                        retry_after = float(ra)
+                    except (TypeError, ValueError):
+                        pass
+                raise self._classify(resp.status, raw, model, retry_after)
+
+            if not stream:
+                raw = resp.read().decode("utf-8", "replace")
+                resp_bytes = len(raw.encode("utf-8", "replace"))
+                reusable = not getattr(resp, "will_close", False)
+                data = json.loads(raw or "{}")
+                choice = (data.get("choices") or [{}])[0] or {}
+                msg = choice.get("message") or {}
+                tin, tout = self._usage(data)
+                calls = {}
+                for i, tc in enumerate(msg.get("tool_calls") or []):
+                    fn = tc.get("function") or {}
+                    calls[i] = {"id": tc.get("id"),
+                                "function": {"name": fn.get("name") or "",
+                                             "arguments": self._args_value(
+                                                 fn.get("arguments"))}}
+                return Reply(model=model,
+                             thinking=str(msg.get("reasoning_content") or
+                                          msg.get("reasoning") or ""),
+                             content=self._delta_text(msg.get("content")),
+                             tool_calls=self._normalise_calls(calls),
+                             prompt_eval_count=tin, eval_count=tout,
+                             done_reason=choice.get("finish_reason") or "stop",
+                             ms=int((time.time() - started) * 1000))
+
+            sock = getattr(getattr(resp.fp, "raw", None), "_sock", None)
+            if sock is not None:
+                sock.settimeout(self.idle_timeout)
+
+            reply = Reply(model=model)
+            calls: dict = {}
+            finished = False
+            got_done = False
+            while True:
+                self._check_cancel()
+                try:
+                    line = resp.readline()
+                except (socket.timeout, TimeoutError) as exc:
+                    raise StreamStalled(
+                        f"no bytes for {self.idle_timeout}s (network switch or stalled server)"
+                    ) from exc
+                except (ConnectionError, OSError) as exc:
+                    raise StreamStalled("connection lost mid-stream") from exc
+                if not line:
+                    break
+                resp_bytes += len(line)
+                text = line.decode("utf-8", "replace").strip()
+                if not text or text.startswith(":") or not text.startswith("data:"):
+                    continue
+                data = text[5:].strip()
+                if data == "[DONE]":
+                    got_done = True
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(chunk, dict):
+                    continue
+                if isinstance(chunk.get("error"), dict):
+                    # Some compatible servers report a mid-stream error with
+                    # HTTP 200.  Surface it as a normal API error.
+                    err = chunk["error"]
+                    raise BadRequest(200, json.dumps(err, ensure_ascii=False), model)
+                tin, tout = self._usage(chunk)
+                if tin or tout:
+                    reply.prompt_eval_count, reply.eval_count = tin, tout
+                choice = (chunk.get("choices") or [{}])[0] or {}
+                delta = choice.get("delta") or {}
+                if not isinstance(delta, dict):
+                    delta = {}
+                th = (delta.get("reasoning_content") or
+                      delta.get("reasoning") or "")
+                if th:
+                    th = self._delta_text(th)
+                    reply.thinking += th
+                    if on_delta:
+                        on_delta("thinking", th)
+                co = self._delta_text(delta.get("content"))
+                if co:
+                    reply.content += co
+                    if on_delta:
+                        on_delta("content", co)
+                for tc in delta.get("tool_calls") or []:
+                    if not isinstance(tc, dict):
+                        continue
+                    try:
+                        idx = int(tc.get("index") or 0)
+                    except (TypeError, ValueError):
+                        idx = 0
+                    item = calls.setdefault(idx, {"id": None,
+                                                  "function": {"name": "",
+                                                               "arguments": ""}})
+                    if tc.get("id"):
+                        item["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        item["function"]["name"] = fn["name"]
+                    arg = fn.get("arguments")
+                    if arg is not None:
+                        item["function"]["arguments"] += self._args_value(arg)
+                fr = choice.get("finish_reason")
+                if fr:
+                    reply.done_reason = str(fr)
+                    finished = True
+            reply.ms = int((time.time() - started) * 1000)
+            if not (got_done or finished):
+                raise StreamStalled("stream ended before [DONE]")
+            reply.tool_calls = self._normalise_calls(calls)
+            if reply.tool_calls and reply.done_reason == "stop":
+                reply.done_reason = "tool_calls"
+            if on_delta:
+                for tc in reply.tool_calls:
+                    on_delta("tool_call", tc)
+            # Drain the rest of a content-length/chunked response so the
+            # persistent socket is clean for the next request (F7).
+            try:
+                resp.read()
+                reusable = not getattr(resp, "will_close", False)
+            except Exception:
+                reusable = False
+            return reply
+        finally:
+            if got_resp:
+                self._log_http("POST", path, model, status, started, ttfb,
+                               req_bytes, resp_bytes, headers, think=think,
+                               format=format, prefix=prefix,
+                               error_body=error_body)
+            if reusable:
+                self._release(conn)
+            else:
+                self._discard(conn)
+
+    def tags(self) -> list:
+        """GET {base}/models; normalise ids to HYDRA's ``{"name": ...}`` shape."""
+        data = self._json_request("GET", self._api_path("/models"))
+        items = data.get("data") if isinstance(data, dict) else None
+        if items is None and isinstance(data, dict):
+            items = data.get("models")
+        out = []
+        for item in items or []:
+            if isinstance(item, dict):
+                name = item.get("id") or item.get("name") or item.get("model")
+                if name:
+                    out.append({"name": str(name), "model": str(name)})
+            elif item:
+                out.append({"name": str(item), "model": str(item)})
+        return out
+
+    def web_search(self, query: str, max_results: int = 5) -> dict:
+        # No hosted search endpoint in the OpenAI protocol.  Let the caller's
+        # capability probe fail closed for search while web_fetch's raw
+        # fallback keeps working.
+        return self._json_request("POST", self._api_path("/web_search"),
+                                  {"query": query, "max_results": int(max_results)})
+
+    def web_fetch(self, url: str) -> dict:
+        return self._json_request("POST", self._api_path("/web_fetch"),
+                                  {"url": url})
+
+
+def make_client(cfg: dict):
+    """Build the configured transport without changing the default.
+
+    ``[api] protocol`` is intentionally read only here: Ollama stays the
+    default, and an OpenAI-compatible endpoint is opt-in.
+    """
+    from . import config as C
+    protocol = str(C.get(cfg, "api.protocol", "ollama") or "ollama").strip().lower()
+    host = str(C.get(cfg, "api.host", "https://ollama.com"))
+    key = C.load_key(cfg) or ""
+    connect = C.get(cfg, "api.connect_timeout", 15) or 15
+    idle = C.get(cfg, "api.idle_timeout", 90) or 90
+    cls = OpenAiClient if protocol == "openai" else OllamaCloud
+    return cls(host, key, connect, idle)

@@ -22,7 +22,7 @@ from . import hygiene
 from . import journal as J
 from . import limits as Limits
 from .agent import Agent, build_env_block, load_system_prompt
-from .client import AuthError, OllamaCloud
+from .client import AuthError, make_client
 from .gate import LLMGate
 from .loop import run_agent
 from .models import ModelRegistry
@@ -91,11 +91,7 @@ class Runtime:
         self.budget_hit = False
         self.redact = hygiene.make_redactor(cfg)
         self.debug_http = httpdebug.enabled(cfg)   # F4 --debug-http / env var
-        key = C.load_key(cfg) or ""
-        self.client = OllamaCloud(
-            C.get(cfg, "api.host", "https://ollama.com"), key,
-            C.get(cfg, "api.connect_timeout", 15) or 15,
-            C.get(cfg, "api.idle_timeout", 90) or 90)
+        self.client = make_client(cfg)
         self.sigint = threading.Event()   # first Ctrl-C: cancel, keep the run alive
         self.client.cancel_event = self.sigint
         self.client.redact = self.redact
@@ -474,9 +470,9 @@ class Runtime:
             return (0 if ok else 1), report
         except AuthError as exc:
             self.run_meta.update({"status": "auth-error", "exit_code": 1})
-            self.ui.info("\n401/403 from the API: the Ollama key is missing or wrong.")
-            self.ui.info("Fix: echo 'export OLLAMA_API_KEY=your_key' >> ~/.bashrc && source ~/.bashrc")
-            self.ui.info("  or: mkdir -p ~/.hydra && echo your_key > ~/.hydra/key && chmod 600 ~/.hydra/key")
+            self.ui.info("\n401/403 from the API: the configured key is missing or wrong.")
+            self.ui.info("Fix: export the configured api.key_env (OLLAMA_API_KEY, ")
+            self.ui.info("OPENROUTER_API_KEY or OPENAI_API_KEY), or write ~/.hydra/key (chmod 600).")
             self.ui.info(f"({exc})")
             self._hook("error", lead, f"{type(exc).__name__}: {exc}")
             return 1, (lead.report or {})

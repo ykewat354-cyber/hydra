@@ -23,7 +23,7 @@ from pathlib import Path
 
 from . import config as C
 from .client import (AuthError, BadRequest, ModelMissing, OllamaCloud,
-                     PaidModel, ServerError, StreamStalled)
+                     PaidModel, ServerError, StreamStalled, make_client)
 
 # Fallback for models that were never probed.  Snapshot knowledge lives in
 # exactly one place per line and nowhere in the control flow.
@@ -87,6 +87,8 @@ class ModelRegistry:
         return st
 
     def think_style(self, model: str) -> str:
+        if str(C.get(self.cfg, "api.protocol", "ollama") or "ollama").lower() == "openai":
+            return "none"
         st = self.entry(model).get("think_style")
         if st in ("levels", "bool", "none"):
             return st
@@ -405,12 +407,11 @@ def _cmd_probe(cfg: dict, args: list) -> int:
     key = C.load_key(cfg)
     host = C.get(cfg, "api.host", "https://ollama.com")
     if not key:
-        print("hydra: no Ollama API key. Put it in ~/.hydra/key "
-              "or export OLLAMA_API_KEY.")
+        print("hydra: no API key. Put it in ~/.hydra/key or set the configured "
+              "api.key_env (OPENROUTER_API_KEY / OPENAI_API_KEY also work for "
+              "protocol=openai).")
         return 1
-    client = OllamaCloud(host, key,
-                         C.get(cfg, "api.connect_timeout", 15),
-                         C.get(cfg, "api.idle_timeout", 90))
+    client = make_client(cfg)
     gate = LLMGate(C.max_inflight(cfg))
     reg = ModelRegistry(cfg)
     print(f"probing via {host} (serial through the gate)...")
