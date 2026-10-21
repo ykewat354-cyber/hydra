@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-import sys
 sys.path.insert(0, str(REPO))
 
 from tests.fake_openai import FakeOpenAI          # noqa: E402
@@ -118,6 +119,62 @@ class OpenAiTransportTests(OpenAiBase):
         self.assertEqual(cm.exception.retry_after, 2.5)
         with self.assertRaises(PaidModel):
             self.client.chat("test-model", [{"role": "user", "content": "x"}])
+
+
+class OpenAiCliBlackBoxTests(unittest.TestCase):
+    def test_public_plain_cli_run_against_fake_openai(self):
+        srv = FakeOpenAI(tags=["gpt-oss:120b"],
+                         require_auth="Bearer test-key").start()
+        home = tempfile.TemporaryDirectory()
+        cwd = tempfile.TemporaryDirectory()
+        old_home = os.environ.get("HYDRA_HOME")
+        old_key = os.environ.get("WO5_CLI_KEY")
+        os.environ["HYDRA_HOME"] = home.name
+        os.environ["WO5_CLI_KEY"] = "test-key"
+        try:
+            srv.add("gpt-oss:120b",
+                    {"content": "writing",
+                     "tool_calls": [{"name": "write_file",
+                                     "arguments": {"path": "cli.txt",
+                                                   "content": "ok\\n"}}]},
+                    {"content": "done",
+                     "tool_calls": [{"name": "finish",
+                                     "arguments": {"status": "done",
+                                                   "summary": "cli.txt created",
+                                                   "files_changed": ["cli.txt"]}}]})
+            env = dict(os.environ)
+            env.update(HYDRA_HOME=home.name, PYTHONPATH=str(REPO),
+                       NO_COLOR="1")
+            cmd = [sys.executable, "-m", "hydra", "--plain",
+                   "--set", "api.protocol=openai",
+                   "--set", f"api.host={srv.url}/v1",
+                   "--set", "api.key_env=WO5_CLI_KEY",
+                   "--set", "api.retries=1",
+                   "--set", "loop.verify=never",
+                   "--set", "termux.wake_lock=false",
+                   "--set", "termux.notify_on_finish=false",
+                   "--set", "termux.notify_on_park=false",
+                   "create cli.txt"]
+            proc = subprocess.run(cmd, cwd=cwd.name, env=env,
+                                  capture_output=True, text=True, timeout=60)
+            self.assertEqual(proc.returncode, 0,
+                             (proc.stdout or "")[-1200:] + (proc.stderr or "")[-1200:])
+            self.assertTrue((Path(cwd.name) / "cli.txt").is_file())
+            self.assertTrue(srv.chat_requests())
+            self.assertTrue(all(r["path"] == "/v1/chat/completions"
+                                for r in srv.chat_requests()))
+        finally:
+            srv.stop()
+            home.cleanup()
+            cwd.cleanup()
+            if old_home is None:
+                os.environ.pop("HYDRA_HOME", None)
+            else:
+                os.environ["HYDRA_HOME"] = old_home
+            if old_key is None:
+                os.environ.pop("WO5_CLI_KEY", None)
+            else:
+                os.environ["WO5_CLI_KEY"] = old_key
 
 
 class ProtocolConfigTests(unittest.TestCase):
