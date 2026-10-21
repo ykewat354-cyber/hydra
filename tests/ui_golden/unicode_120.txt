@@ -1,5 +1,5 @@
                                                                                          │AGENTS                        
- █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.4.0                                                        │● a0 worker                 0 
+ █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.5.0                                                        │● a0 worker                 0 
  █▀█ ▀█▀ █ █ ██▀ █▀█  nemotron-3-super                                                   │                              
  ▀ ▀  ▀  ▀▀  ▀ ▀ ▀ ▀  free plan · key ✓ loaded                                           │RUN                           
                                                                                          │r_demo_1405                   

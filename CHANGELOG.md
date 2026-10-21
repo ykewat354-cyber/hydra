@@ -6,6 +6,38 @@ All notable changes to HYDRA. Dates are local (Termux, Android).
 > hotfix (`62a5a5a`). WO3's final commit now carries the `v1.3.1` tag; the
 > hotfix is preserved as `v1.3.1-taskfocus`.
 
+## v1.5.0 — Cross-Provider Failover & Safe Commits (2026-10-21)
+
+- **Named providers in one role chain.** Optional `[providers.<name>]` blocks
+  (built-ins: `ollama`, `openai`, `openrouter`, `groq`, `deepseek`, `local`)
+  let a chain mix e.g. `gpt-oss:120b`, `openrouter:deepseek/deepseek-chat` and
+  `local:qwen2.5-coder:7b`. A prefix is a provider only when it is a known
+  name, so Ollama tags such as `gemma4:31b` and `qwen2.5:7b` are unchanged.
+  Provider transports are lazy and all are closed at run end.
+- **Cross-provider failover.** After the normal retry policy, a terminal 402 /
+  404 / 429 / 5xx advances to the next chain entry and journals a `failover`
+  event (`from_model`, `to_model`, `reason`). The default `[api]` provider is
+  still Ollama Cloud; no provider is contacted unless it appears in a chain.
+  `hydra models ls --roles` and TUI/REPL `/models` show the resolved provider.
+- **Strict OpenAI message normalization.** A pure
+  `normalize_messages_for_openai()` now converts dict tool arguments to JSON
+  strings, preserves or deterministically generates call ids, pairs every
+  `role:tool` result with its assistant call, and converts `images` to
+  `image_url` vision parts. HYDRA tool results keep their `tool_call_id`
+  through the loop, Ctrl-C and resume paths. A multi-turn fake test runs turn
+  1 on Ollama and turn 2 on a strict OpenAI-compatible fake.
+- **`/commit` and `hydra commit`.** Review with `/diff`, then commit with
+  `/commit [msg]` or `hydra commit [msg]`; no message uses the latest run
+  report summary (or a diffstat fallback). The command refuses before staging
+  when the diff or an untracked file contains a scanner secret pattern or an
+  active API key, reporting only pattern + `file:line`. On success it prints
+  the short hash and `git show --stat --oneline HEAD`; `.hydra/` and ignored
+  files are never staged. No model call or approval gate is involved.
+- **Regression.** 481 stdlib tests green, including new provider-parser,
+  provider-client, normalizer, cross-provider failover, commit clean/message/
+  secret/active-key and TUI registration tests. Footprint remains below the
+  4,800-token cap.
+
 ## v1.4.0 — OmniRoute Lite & Code Precision (2026-10-21)
 
 - **Optional OpenAI-compatible transport.** `[api] protocol = "openai"` sends
