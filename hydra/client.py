@@ -120,6 +120,110 @@ def classify(status: int, body: str, model: str, retry_after=None) -> ApiError:
     return BadRequest(status, body, model)
 
 
+# ---------------------------------------------------------------- OpenAI messages
+
+def _json_args(value) -> str:
+    """OpenAI requires ``function.arguments`` to be a JSON string."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value if value is not None else {},
+                          ensure_ascii=False)
+    except Exception:
+        return "{}"
+
+
+def normalize_messages_for_openai(messages: list) -> list:
+    """Return a pure OpenAI-wire copy of HYDRA's transcript.
+
+    HYDRA's native/Ollama transcript stores tool arguments as dicts and may
+    omit call ids.  Strict compatible servers require string arguments, an id
+    on every assistant tool call, and a matching ``tool_call_id`` on every
+    ``role: tool`` result.  User messages carrying ``images`` become OpenAI
+    vision content arrays.  The input list is never mutated.
+    """
+    out: list = []
+    pending: list = []       # calls from the most recent assistant turn
+    for turn, raw in enumerate(messages or []):
+        if not isinstance(raw, dict):
+            continue
+        role = str(raw.get("role") or "user")
+        if role == "assistant":
+            calls = []
+            for idx, tc in enumerate(raw.get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
+                name = str(fn.get("name") or "")
+                if not name:
+                    continue
+                cid = tc.get("id") or tc.get("tool_call_id")
+                if not cid:
+                    cid = f"call_{turn}_{idx}"
+                calls.append({
+                    "id": str(cid),
+                    "type": "function",
+                    "function": {"name": name,
+                                 "arguments": _json_args(fn.get("arguments"))},
+                })
+            msg = {"role": "assistant", "content": raw.get("content") or ""}
+            if calls:
+                msg["tool_calls"] = calls
+                pending = [{"id": c["id"], "name": c["function"]["name"],
+                            "used": False} for c in calls]
+            else:
+                pending = []
+            out.append(msg)
+            continue
+
+        if role == "tool":
+            wanted = raw.get("tool_call_id")
+            chosen = None
+            if wanted:
+                for item in pending:
+                    if not item["used"] and item["id"] == str(wanted):
+                        chosen = item
+                        break
+            if chosen is None and pending:
+                name = str(raw.get("tool_name") or raw.get("name") or "")
+                for item in pending:
+                    if not item["used"] and name and item["name"] == name:
+                        chosen = item
+                        break
+                if chosen is None:
+                    chosen = next((x for x in pending if not x["used"]), None)
+            if chosen is not None:
+                chosen["used"] = True
+                cid = chosen["id"]
+            else:
+                cid = str(wanted or f"call_{turn}_0")
+            out.append({"role": "tool", "tool_call_id": cid,
+                        "content": str(raw.get("content") or "")})
+            continue
+
+        # A normal message closes any dangling tool-call window.
+        pending = []
+        content = raw.get("content") or ""
+        if role == "user" and raw.get("images"):
+            parts = []
+            if content:
+                parts.append({"type": "text", "text": str(content)})
+            images = raw.get("images")
+            if isinstance(images, str):
+                images = [images]
+            for b64 in images or []:
+                text = str(b64 or "")
+                if not text:
+                    continue
+                url = text if text.startswith("data:") else \
+                    f"data:image/png;base64,{text}"
+                parts.append({"type": "image_url",
+                              "image_url": {"url": url}})
+            content = parts
+        out.append({"role": role, "content": content})
+    return out
+
+
 # ---------------------------------------------------------------- client
 
 class OllamaCloud:
@@ -489,70 +593,25 @@ class OpenAiClient(OllamaCloud):
         return (self._base_path + suffix) or suffix
 
     def _headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self.key}",
+        headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream, application/json",
             "Connection": "keep-alive",
             "User-Agent": "hydra/1.0 (termux)",
         }
+        if self.key:
+            headers["Authorization"] = f"Bearer {self.key}"
+        return headers
 
     @staticmethod
     def _args_value(value):
         """Keep arguments as JSON text on the wire, as OpenAI expects."""
-        if isinstance(value, str):
-            return value
-        try:
-            return json.dumps(value if value is not None else {}, ensure_ascii=False)
-        except Exception:
-            return "{}"
+        return _json_args(value)
 
     @classmethod
     def _convert_messages(cls, messages: list) -> list:
-        """Translate HYDRA's Ollama-shaped transcript to OpenAI messages.
-
-        HYDRA stores tool calls as ``{"function": {name, arguments: dict}}`` and
-        tool results as ``{"role": "tool", "tool_name": ...}``.  OpenAI wants
-        string arguments, an id on every call, and a matching ``tool_call_id``
-        on every tool result.  The order is stable (one assistant turn followed
-        by its results), so a small pending queue is enough.
-        """
-        out: list = []
-        pending: list = []
-        for m in messages or []:
-            if not isinstance(m, dict):
-                continue
-            role = str(m.get("role") or "user")
-            if role == "assistant":
-                msg = {"role": "assistant",
-                       "content": m.get("content") or ""}
-                calls = []
-                for i, tc in enumerate(m.get("tool_calls") or []):
-                    if not isinstance(tc, dict):
-                        continue
-                    fn = tc.get("function") if isinstance(tc.get("function"), dict) else tc
-                    name = str(fn.get("name") or "")
-                    if not name:
-                        continue
-                    cid = str(tc.get("id") or f"call_{len(out)}_{i}")
-                    calls.append({"id": cid, "type": "function",
-                                  "function": {"name": name,
-                                               "arguments": cls._args_value(
-                                                   fn.get("arguments"))}})
-                    pending.append(cid)
-                if calls:
-                    msg["tool_calls"] = calls
-                out.append(msg)
-                continue
-            if role == "tool":
-                cid = pending.pop(0) if pending else "call_unknown"
-                out.append({"role": "tool", "tool_call_id": cid,
-                            "content": str(m.get("content") or "")})
-                continue
-            # A non-tool message closes any dangling result window.
-            pending = []
-            out.append({"role": role, "content": m.get("content") or ""})
-        return out
+        """Translate HYDRA's Ollama-shaped transcript to OpenAI messages."""
+        return normalize_messages_for_openai(messages)
 
     @staticmethod
     def _usage(data) -> tuple:
@@ -824,17 +883,31 @@ class OpenAiClient(OllamaCloud):
                                   {"url": url})
 
 
-def make_client(cfg: dict):
-    """Build the configured transport without changing the default.
+def make_client(cfg: dict, provider: str = None):
+    """Build the default transport or one named provider's transport.
 
-    ``[api] protocol`` is intentionally read only here: Ollama stays the
-    default, and an OpenAI-compatible endpoint is opt-in.
+    ``provider=None``/``"default"`` keeps the original ``[api]`` behavior.
+    Named providers are lazy: they are only constructed when a role chain
+    actually references ``<provider>:<model>``.
     """
     from . import config as C
-    protocol = str(C.get(cfg, "api.protocol", "ollama") or "ollama").strip().lower()
-    host = str(C.get(cfg, "api.host", "https://ollama.com"))
-    key = C.load_key(cfg) or ""
-    connect = C.get(cfg, "api.connect_timeout", 15) or 15
-    idle = C.get(cfg, "api.idle_timeout", 90) or 90
+    name = str(provider or "default").strip().lower()
+    if name in ("", "default"):
+        protocol = str(C.get(cfg, "api.protocol", "ollama") or "ollama").strip().lower()
+        host = str(C.get(cfg, "api.host", "https://ollama.com"))
+        key = C.load_key(cfg) or ""
+        connect = C.get(cfg, "api.connect_timeout", 15) or 15
+        idle = C.get(cfg, "api.idle_timeout", 90) or 90
+    else:
+        p = C.provider_config(cfg, name)
+        if not p:
+            raise ValueError(f"unknown provider: {name}")
+        protocol = str(p.get("protocol") or "openai").strip().lower()
+        host = str(p.get("host") or "")
+        if not host:
+            raise ValueError(f"provider {name!r} has no host")
+        key = C.load_key(cfg, name) or ""
+        connect = p.get("connect_timeout", 15) or 15
+        idle = p.get("idle_timeout", 90) or 90
     cls = OpenAiClient if protocol == "openai" else OllamaCloud
     return cls(host, key, connect, idle)

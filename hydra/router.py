@@ -14,8 +14,14 @@ import time
 
 from . import config as C
 from .client import (ApiError, AuthError, BadRequest, ContextOverflow, EmptyReply,
-                     ModelMissing, PaidModel, RateLimited, ServerError, StreamStalled)
+                     ModelMissing, PaidModel, RateLimited, ServerError, StreamStalled,
+                     make_client)
 from .models import DEFAULT_THINK_STYLE  # re-exported; probe results override it
+
+
+def parse_model_spec(spec: str, cfg: dict = None) -> tuple:
+    """Public alias for the provider-aware role-chain parser (W6-1)."""
+    return C.parse_model_spec(spec, cfg)
 
 
 class AllModelsFailed(Exception):
@@ -27,15 +33,19 @@ class AllModelsFailed(Exception):
 
 
 class Router:
-    def __init__(self, cfg: dict, client, prices=None, journal=None, gate=None, registry=None):
+    def __init__(self, cfg: dict, client, prices=None, journal=None, gate=None,
+                 registry=None, client_for=None):
         self.cfg = cfg
         self.client = client
+        self.client_for = client_for
         self.prices = prices or {}
         self.journal = journal
         self.gate = gate
         self.registry = registry
         self.sleep = time.sleep
         self._lock = threading.Lock()
+        self._client_lock = threading.Lock()
+        self._clients = {}
         self._breakers = {}
         self._reprobe_last = {}   # model -> {"fails": int, "open_until": ts, "cooldown": sec}
         self._base_cooldown = float(C.get(cfg, "routing.breaker_cooldown", 300) or 300)
@@ -174,8 +184,45 @@ class Router:
             except Exception:
                 pass
 
+    def _client_for(self, provider: str):
+        """Return the transport for a provider, lazily and without failover."""
+        name = str(provider or "default").strip().lower()
+        if name in ("", "default"):
+            return self.client
+        if self.client_for is not None:
+            return self.client_for(name)
+        with self._client_lock:
+            client = self._clients.get(name)
+            if client is None:
+                client = make_client(self.cfg, name)
+                self._clients[name] = client
+            return client
+
+    @staticmethod
+    def _reason(exc) -> str:
+        if isinstance(exc, PaidModel):
+            return "402 paid/credits"
+        if isinstance(exc, ModelMissing):
+            return "404 model missing"
+        if isinstance(exc, RateLimited):
+            return "429 rate limited"
+        if isinstance(exc, ServerError):
+            return "5xx server error"
+        if isinstance(exc, (StreamStalled, ConnectionError, TimeoutError, OSError)):
+            return "connection/stream error"
+        if isinstance(exc, EmptyReply):
+            return "empty reply"
+        return f"{type(exc).__name__}"
+
     def _ledger(self, agent, role, model, reply):
         prices = self.prices.get(model, {}) or {}
+        if not prices:
+            # Named-provider entries carry a prefix; price tables stay keyed by
+            # the bare model id.
+            try:
+                prices = self.prices.get(parse_model_spec(model, self.cfg)[1], {}) or {}
+            except Exception:
+                prices = {}
         est = (reply.prompt_eval_count * float(prices.get("in", 0)) +
                reply.eval_count * float(prices.get("out", 0))) / 1e6
         if agent is not None:
@@ -232,7 +279,8 @@ class Router:
             old = e.get("status")
             try:
                 from .models import probe_one
-                res = probe_one(self.client, self.gate, model)
+                provider, wire_model = parse_model_spec(model, self.cfg)
+                res = probe_one(self._client_for(provider), self.gate, wire_model)
                 reg.mark(model, res.get("status", "unknown"),
                          tools=res.get("tools"), json=res.get("json"),
                          think_style=res.get("think_style"),
@@ -273,8 +321,25 @@ class Router:
                               "or filtered out")],
                 all_paid=self._all_paid(role))
         priority = getattr(agent, "depth", 0) if agent else 0
+        last_failed = None
+        last_reason = ""
         for model in chain:
             if self._breaker_open(model):
+                continue
+            if last_failed:
+                # A terminal failure on the previous candidate advances to the
+                # next one, whether it is on the same provider or a different
+                # one.  Retries within one model are not failovers.
+                self._event("failover", agent, from_model=last_failed,
+                            to_model=model, reason=last_reason)
+                last_failed, last_reason = None, ""
+            provider, wire_model = parse_model_spec(model, self.cfg)
+            try:
+                model_client = self._client_for(provider)
+            except Exception as exc:
+                all_paid = False
+                errors.append(exc)
+                last_failed, last_reason = model, f"provider {provider}: {type(exc).__name__}"
                 continue
             attempt = 0
             repair_left = True
@@ -287,11 +352,12 @@ class Router:
                         # emitted while queueing would make serialized calls look
                         # concurrent to the timeline analysis.
                         self._event("model_request", agent, role=role, model=model,
+                                    provider=provider, wire_model=wire_model,
                                     tools=[t.get("function", {}).get("name")
                                            for t in (tools or [])],
                                     n_messages=len(messages), attempt=attempt)
-                        reply = self.client.chat(
-                            model, messages,
+                        reply = model_client.chat(
+                            wire_model, messages,
                             tools=tools or None,
                             think=self.think_setting(role, model, think),
                             options=self.options_for(role) or None,
@@ -312,6 +378,9 @@ class Router:
                                 "content": "Your previous reply was empty. Reply with tool calls or a complete final answer."}]
                             continue
                         raise EmptyReply("empty reply twice")
+                    # Keep the provider-qualified identity visible to the UI,
+                    # journal and next agent turn; the wire call used the bare id.
+                    reply.model = model
                     return reply
                 except AuthError:
                     raise
@@ -320,11 +389,13 @@ class Router:
                 except PaidModel as e:
                     self._mark(model, "paid")
                     errors.append(e)
+                    last_failed, last_reason = model, self._reason(e)
                     break
                 except ModelMissing as e:
                     self._mark(model, "missing")
                     all_paid = False
                     errors.append(e)
+                    last_failed, last_reason = model, self._reason(e)
                     break
                 except RateLimited as e:
                     all_paid = False
@@ -333,6 +404,7 @@ class Router:
                     if attempt < self._retries:
                         continue
                     errors.append(e)
+                    last_failed, last_reason = model, self._reason(e)
                     break
                 except (ServerError, StreamStalled, ConnectionError, TimeoutError,
                         OSError, EmptyReply) as e:
@@ -342,6 +414,7 @@ class Router:
                         self.sleep(self._backoff(attempt))
                         continue
                     errors.append(e)
+                    last_failed, last_reason = model, self._reason(e)
                     break
                 except BadRequest as e:
                     all_paid = False
@@ -362,6 +435,7 @@ class Router:
                                        f"Fix the tool-call format and try again."}]
                         continue
                     errors.append(e)
+                    last_failed, last_reason = model, "400 bad request"
                     break
         if not errors:
             errors.append(RuntimeError("all candidate models skipped (breakers open)"))

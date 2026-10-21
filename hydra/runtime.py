@@ -96,13 +96,16 @@ class Runtime:
         self.client.cancel_event = self.sigint
         self.client.redact = self.redact
         self.client.reject_status = Limits.rejection_status()  # F5
+        self._clients = {"default": self.client}
+        self._client_lock = threading.Lock()
+        self._http_log = None
         self._child_env: dict = {}
         self.gate = LLMGate(Limits.gate_capacity(cfg),
                             semantics=Limits.semantics())      # F5
         self.caps = Caps.get_caps(cfg, client=self.client)     # F6 (24 h cache)
         self.registry = ModelRegistry(cfg)
         self.router = Router(cfg, self.client, self.prices, gate=self.gate,
-                             registry=self.registry)
+                             registry=self.registry, client_for=self.client_for)
 
         if ui is None:
             from .tui import Tui
@@ -126,6 +129,22 @@ class Runtime:
         self._lock = threading.RLock()
         self._run_lock = None
         self.paused = threading.Event()  # REPL /pause — checked between turns
+
+    def client_for(self, provider: str):
+        """Lazily create and cache a named provider transport (W6-1)."""
+        name = str(provider or "default").strip().lower()
+        if name in ("", "default"):
+            return self.client
+        with self._client_lock:
+            client = self._clients.get(name)
+            if client is None:
+                client = make_client(self.cfg, name)
+                client.cancel_event = self.sigint
+                client.redact = self.redact
+                client.reject_status = Limits.rejection_status()
+                client.http_log = self._http_log
+                self._clients[name] = client
+            return client
 
     # -------------------------------------------------- ids
     def next_agent_id(self) -> str:
@@ -313,10 +332,15 @@ class Runtime:
         if not self.debug_http or not self.run_id:
             return
         try:
-            self.client.http_log = httpdebug.HttpLogger(
+            self._http_log = httpdebug.HttpLogger(
                 C.run_dir(self.run_id) / "http.jsonl", redact=self.redact)
         except Exception:
-            self.client.http_log = None
+            self._http_log = None
+        for client in list(self._clients.values()):
+            try:
+                client.http_log = self._http_log
+            except Exception:
+                pass
 
     def _setup_agent(self, agent: Agent) -> Agent:
         agent.journal = self.journal
@@ -428,9 +452,12 @@ class Runtime:
         if msgs and msgs[-1].get("role") == "assistant" and msgs[-1].get("tool_calls"):
             for tc in msgs[-1]["tool_calls"]:
                 name = (tc.get("function") or {}).get("name") or tc.get("name") or "?"
-                lead.append({"role": "tool", "tool_name": name,
-                             "content": "INTERRUPTED: harness was killed while this ran; "
-                                        "effects unknown. Inspect state before repeating."})
+                msg = {"role": "tool", "tool_name": name,
+                       "content": "INTERRUPTED: harness was killed while this ran; "
+                                  "effects unknown. Inspect state before repeating."}
+                if tc.get("id"):
+                    msg["tool_call_id"] = str(tc["id"])
+                lead.append(msg)
         self.agents = {lead.id: lead}
         self.swarm = Swarm(self)
         self._sync_agent_seq()
@@ -589,7 +616,14 @@ class Runtime:
                 pool.shutdown(wait=False)
             except Exception:
                 pass
-        try:
-            self.client.close()          # F7: close pooled keep-alive sockets
-        except Exception:
-            pass
+        # F7: close pooled keep-alive sockets for the default and every named
+        # provider client created during this run.
+        seen = set()
+        for client in list(self._clients.values()):
+            if id(client) in seen:
+                continue
+            seen.add(id(client))
+            try:
+                client.close()
+            except Exception:
+                pass

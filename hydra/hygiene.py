@@ -21,6 +21,15 @@ def make_redactor(cfg: dict):
     key = C.load_key(cfg)
     if key and len(key) >= 8 and key not in secrets:
         secrets.append(key)
+    # W6-1: named providers are opt-in but their keys must be redacted from
+    # tool output/journal/HTTP logs just like the default key.
+    for name in sorted(C.provider_names(cfg)):
+        try:
+            value = C.load_key(cfg, name)
+        except Exception:
+            value = None
+        if value and len(value) >= 8 and value not in secrets:
+            secrets.append(value)
     if not secrets:
         return None
 

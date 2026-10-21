@@ -25,6 +25,12 @@ from . import config as C
 from .client import (AuthError, BadRequest, ModelMissing, OllamaCloud,
                      PaidModel, ServerError, StreamStalled, make_client)
 
+
+def parse_model_spec(spec: str, cfg: dict = None) -> tuple:
+    """Provider-aware role-chain parser (also exported from ``hydra.router``)."""
+    return C.parse_model_spec(spec, cfg)
+
+
 # Fallback for models that were never probed.  Snapshot knowledge lives in
 # exactly one place per line and nowhere in the control flow.
 DEFAULT_THINK_STYLE = {
@@ -437,9 +443,6 @@ def _tool_flag(e: dict) -> str:
 
 def _cmd_ls(cfg: dict, args: list = None) -> int:
     reg = ModelRegistry(cfg)
-    if not reg.data.get("models"):
-        print("no models.json yet - run: hydra models probe")
-        return 0
     if args and "--roles" in args:
         roles = ("lead", "worker", "coder", "researcher", "reviewer",
                  "verifier", "critic", "summarizer", "planner", "debugger",
@@ -462,7 +465,8 @@ def _cmd_ls(cfg: dict, args: list = None) -> int:
                     continue
                 effective.append((name, e, status))
             print(f"[{role}]")
-            print(" effective: " + (" -> ".join(n for n, _, _ in effective)
+            print(" effective: " + (" -> ".join(C.model_label(n, cfg)
+                                                   for n, _, _ in effective)
                                     or "(none)"))
             for i, (name, e, status) in enumerate(effective):
                 checked = e.get("checked_at") or 0
@@ -470,19 +474,23 @@ def _cmd_ls(cfg: dict, args: list = None) -> int:
                                      time.localtime(checked)) if checked \
                     else "never"
                 active = " *" if i == 0 else "  "
-                print(f" {active} {name:<22} {status:<7} "
+                print(f" {active} {C.model_label(name, cfg):<30} {status:<7} "
                       f"tools={_tool_flag(e)} "
                       f"json={e.get('json_prompt_class') or e.get('json_class') or '?'} "
                       f"think={e.get('think_style', '?')} checked={when}")
             for name, why in dropped:
-                print(f"   - {name:<22} dropped: {why}")
+                print(f"   - {C.model_label(name, cfg):<30} dropped: {why}")
         lead = [str(m) for m in (C.get(cfg, "roles.lead.chain") or [])]
         lead_eff = [m for m in lead if reg.status_of(m) not in ("paid", "missing")]
         lead_eff = [m for m in lead_eff if reg.is_tool_capable(m)] or lead_eff
-        print("default lead: " + (lead_eff[0] if lead_eff else "(none)") +
+        print("default lead: " + (C.model_label(lead_eff[0], cfg)
+                                   if lead_eff else "(none)") +
               " (first effective lead-chain model)")
         if reg.needs_reprobe():
             print("(stale: run `hydra models probe`)")
+        return 0
+    if not reg.data.get("models"):
+        print("no models.json yet - run: hydra models probe")
         return 0
     for e in reg.list_all():
         checked = time.strftime("%m-%d %H:%M",
