@@ -5,6 +5,7 @@ Python scan. Paths resolve against the agent's workdir.
 """
 from __future__ import annotations
 
+import difflib
 import shutil
 import subprocess
 import tempfile
@@ -83,20 +84,36 @@ def _tool_write_file(args, ctx) -> str:
     return f"wrote {len(content)} chars to {path}"
 
 
-def _closest_context(path: Path, needle: str, span: int = 4) -> str:
-    first = needle.strip().splitlines()[0] if needle.strip() else ""
+def _closest_context(path: Path, needle: str, span: int = 1) -> str:
+    """Three line-numbered candidates for a failed edit, closest first."""
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except Exception:
         return ""
-    hits = [i for i, l in enumerate(lines) if first and first in l][:3]
-    if not hits:
+    wanted = [" ".join(x.split()) for x in str(needle or "").splitlines()
+              if " ".join(x.split())]
+    if not lines or not wanted:
+        return "No similar line found."
+    scored = []
+    for i, line in enumerate(lines):
+        norm = " ".join(line.split())
+        if not norm:
+            continue
+        score = max(difflib.SequenceMatcher(None, w, norm).ratio()
+                    for w in wanted)
+        # Exact substring hits beat a merely similar line.
+        if any(w in norm or norm in w for w in wanted):
+            score = max(score, 0.95)
+        scored.append((score, i))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    picks = scored[:3]
+    if not picks or picks[0][0] < 0.35:
         return "No similar line found."
     chunks = []
-    for i in hits:
-        lo, hi = max(0, i - span), min(len(lines), i + span + 1)
-        chunks.append("\n".join(f"{n + 1}: {lines[n]}" for n in range(lo, hi)))
+    for _score, i in picks:
+        chunks.append(f"{i + 1}: {lines[i]}")
     return "Closest matches:\n" + "\n---\n".join(chunks)
+
 
 
 def _tool_edit_file(args, ctx) -> str:
@@ -170,28 +187,110 @@ def _ws_window(text: str, old: str):
         return ("multi", len(hits))
     return ("ok", hits[0], n)
 
+def _stripped_window(text: str, old: str):
+    """Exact structure, but ignore trailing whitespace on each line."""
+    old_lines = [x.rstrip() for x in old.split("\n")]
+    if not old.strip():
+        return None
+    lines = [x.rstrip() for x in text.split("\n")]
+    n = len(old_lines)
+    hits = []
+    for i in range(0, max(0, len(lines) - n + 1)):
+        if lines[i:i + n] == old_lines:
+            hits.append(i)
+    if not hits:
+        return None
+    if len(hits) > 1:
+        return ("multi", len(hits))
+    return ("ok", hits[0], n)
+
+
+def _uniform_indent_window(text: str, old: str):
+    """Match after removing one *uniform* leading-indent shift.
+
+    This is the common paste case: the block was copied at 2 spaces while the
+    file uses 4.  Relative indentation inside the block must still match.
+    """
+    old_lines = [x.rstrip() for x in old.split("\n")]
+    if not old.strip():
+        return None
+
+    def base(block):
+        indents = [len(x) - len(x.lstrip(" ")) for x in block if x.strip()]
+        return min(indents) if indents else 0
+
+    ob = base(old_lines)
+    oded = [x[ob:] if x.strip() else x for x in old_lines]
+    lines = [x.rstrip() for x in text.split("\n")]
+    n = len(old_lines)
+    hits = []
+    for i in range(0, max(0, len(lines) - n + 1)):
+        window = lines[i:i + n]
+        wb = base(window)
+        wded = [x[wb:] if x.strip() else x for x in window]
+        if wded == oded:
+            hits.append((i, wb - ob))
+    if not hits:
+        return None
+    if len(hits) > 1:
+        return ("multi", len(hits))
+    return ("ok", hits[0][0], n, hits[0][1])
+
+
+def _shift_new(new: str, delta: int) -> str:
+    if not delta:
+        return new
+    out = []
+    for line in new.split("\n"):
+        if line.strip():
+            out.append((" " * max(0, delta)) + line if delta > 0
+                       else line[-delta:] if len(line) >= -delta else line.lstrip(" "))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
 
 def _apply_edit(text: str, old: str, new: str, count: int = 1):
-    """Return (new_text, err). Exact match first, then whitespace-normalized."""
+    """Exact -> trailing-space -> uniform-indent -> whitespace-normalized."""
     occurrences = text.count(old)
-    if occurrences == 0:
-        hit = _ws_window(text, old)
-        if isinstance(hit, tuple) and hit[0] == "ok":
-            _tag, start, n = hit
-            lines = text.split("\n")
-            lines[start:start + n] = new.split("\n")
-            return "\n".join(lines), None
-        if isinstance(hit, tuple) and hit[0] == "multi":
-            return None, (f"old text matches {hit[1]} places in the file even after "
-                          f"whitespace normalization; add surrounding lines to make "
-                          f"it unique")
-        return None, ("old text not found in the file (also tried whitespace-normalized "
-                      "matching).")
-    if count == 1 and occurrences > 1:
-        return None, (f"old text occurs {occurrences} times; make it unique "
-                      f"or pass count={occurrences}.")
-    return text.replace(old, new, count) if count > 1 else text.replace(old, new, 1), None
+    if occurrences:
+        if count == 1 and occurrences > 1:
+            return None, (f"old text occurs {occurrences} times; make it unique "
+                          f"or pass count={occurrences}.")
+        return text.replace(old, new, count) if count > 1 else text.replace(old, new, 1), None
 
+    hit = _stripped_window(text, old)
+    if isinstance(hit, tuple) and hit[0] == "ok":
+        _tag, start, n = hit
+        lines = text.split("\n")
+        lines[start:start + n] = new.split("\n")
+        return "\n".join(lines), None
+    if isinstance(hit, tuple) and hit[0] == "multi":
+        return None, (f"old text matches {hit[1]} places even after ignoring "
+                      f"trailing whitespace; add surrounding lines to make it unique")
+
+    hit = _uniform_indent_window(text, old)
+    if isinstance(hit, tuple) and hit[0] == "ok":
+        _tag, start, n, delta = hit
+        lines = text.split("\n")
+        lines[start:start + n] = _shift_new(new, delta).split("\n")
+        return "\n".join(lines), None
+    if isinstance(hit, tuple) and hit[0] == "multi":
+        return None, (f"old text matches {hit[1]} places after an indentation shift; "
+                      f"add surrounding lines to make it unique")
+
+    hit = _ws_window(text, old)
+    if isinstance(hit, tuple) and hit[0] == "ok":
+        _tag, start, n = hit
+        lines = text.split("\n")
+        lines[start:start + n] = new.split("\n")
+        return "\n".join(lines), None
+    if isinstance(hit, tuple) and hit[0] == "multi":
+        return None, (f"old text matches {hit[1]} places in the file even after "
+                      f"whitespace normalization; add surrounding lines to make "
+                      f"it unique")
+    return None, ("old text not found in the file (also tried trailing-whitespace, "
+                  "uniform-indent and whitespace-normalized matching).")
 
 def _tool_apply_patch(args, ctx) -> str:
     patch = str(args.get("patch") or "")

@@ -15,13 +15,13 @@ Branch: `wo5`.
 - [x] commit W5-1
 
 ## M2 — W5-2 code precision
-- [ ] `hydra diff` + TUI `/diff`
-- [ ] tolerant edit fallback + closest candidates
-- [ ] W5-2 tests
-- [ ] commit W5-2
+- [x] `hydra diff` + TUI `/diff`
+- [x] tolerant edit fallback + closest candidates
+- [x] W5-2 tests
+- [x] commit W5-2
 
 ## M3 — W5-3 release
-- [ ] footprint: 4,735 tokens (< 5,000)
+- [x] footprint: 4,735 tokens (< 5,000)
 - [ ] full suite re-run
 - [ ] eval seed re-run
 - [ ] black-box suite re-run

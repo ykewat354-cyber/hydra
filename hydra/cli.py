@@ -31,9 +31,9 @@ from .client import CallCancelled
 COMMANDS = {"run", "resume", "ls", "sessions", "tail", "tree", "usage",
             "doctor", "kill", "models", "undo", "init", "map", "eval",
             "daemon", "boot", "schedule", "report", "update", "help",
-            "version", "ui-demo", "footprint"}
+            "version", "ui-demo", "footprint", "diff"}
 
-HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud).
+HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud default).
 
 usage:  hydra                       open the full-screen TUI (works from any folder)
         hydra "task"                open the TUI with a task already running
@@ -66,6 +66,7 @@ commands:
                         queue runner; --resume also auto-continues killed runs
   schedule add|ls|rm    periodic jobs fired by the daemon
   map [PATH] [BUDGET]   repo map: tree + top-level symbols (cached)
+  diff [path]           review uncommitted changes (git diff HEAD)
   undo [RUN] [--to N]   restore the workdir from a shadow snapshot
   ui-demo [SCENE]       scripted UI scenes (home/running/done/palette/
                         stream/unicode/glyphs/all; --cost N previews the
@@ -278,6 +279,8 @@ def main(argv=None) -> int:
         return cmd_tail(rest[1:])
     if cmd == "tree":
         return cmd_tree(rest[1:])
+    if cmd == "diff":
+        return cmd_diff(rest[1:])
     if cmd == "report":
         from . import report as R
         return R.cli(cfg, rest[1:], json_out=o.json_out)
@@ -1327,6 +1330,18 @@ def _age_text(seconds: float) -> str:
     return S.age_text(seconds)
 
 
+def cmd_diff(args) -> int:
+    """Print the worktree diff, or a clean one-line notice."""
+    from . import diffview
+    path = str(args[0]) if args else ""
+    text, note = diffview.git_diff(os.getcwd(), path)
+    if note:
+        print(note)
+        return 0
+    print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
 def cmd_ls() -> int:
     return cmd_sessions([])
 
@@ -1629,11 +1644,9 @@ def _doctor_caps(cfg) -> int:
     """`hydra doctor --caps`: boolean probe of the local + hosted tools."""
     from . import caps as Caps
     from . import hygiene
-    from .client import OllamaCloud
+    from .client import make_client
 
-    key = C.load_key(cfg) or ""
-    host = C.get(cfg, "api.host", "https://ollama.com")
-    cli = OllamaCloud(host, key, C.get(cfg, "api.connect_timeout", 15) or 15)
+    cli = make_client(cfg)
     cli.redact = hygiene.make_redactor(cfg)
     try:
         data = Caps.get_caps(cfg, client=cli, force=True)
@@ -1730,9 +1743,8 @@ def _doctor_full(cfg, *, which=None, client=None, net_check=None,
     if key or client is not None:
         cli, made = client, client is None
         if cli is None:
-            from .client import OllamaCloud
-            cli = OllamaCloud(host, key, C.get(cfg, "api.connect_timeout", 15) or 15,
-                              C.get(cfg, "api.idle_timeout", 90) or 90)
+            from .client import make_client
+            cli = make_client(cfg)
         try:
             tags = cli.tags()
             for t in tags or []:
@@ -1759,7 +1771,6 @@ def _doctor_full(cfg, *, which=None, client=None, net_check=None,
 
 
 def cmd_doctor(cfg, args=None) -> int:
-    from .client import OllamaCloud
     args = list(args or [])
     if "--full" in args:
         return _doctor_full(cfg)
@@ -1793,7 +1804,8 @@ def cmd_doctor(cfg, args=None) -> int:
         host = C.get(cfg, "api.host", "https://ollama.com")
         t0 = time.time()
         try:
-            cli = OllamaCloud(host, key, 8, 15)
+            from .client import make_client
+            cli = make_client(cfg)
             tags = cli.tags()
             ms = int((time.time() - t0) * 1000)
             chk(f"api reachable ({host}, {ms} ms, {len(tags)} models)", True)

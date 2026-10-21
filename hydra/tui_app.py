@@ -485,6 +485,18 @@ def render_block(b: Block, width: int, theme: Theme, verbose: bool = False) -> l
             out.append((row, "dim"))
         return out
 
+    if k == "diff":
+        m = b.meta if isinstance(b.meta, dict) else {}
+        path = str(m.get("path") or "").strip()
+        title = "diff" + (f" {path}" if path else " · worktree")
+        out.append((U.clip_display(f"{sym('tool')} {title}", width), "head"))
+        rows = m.get("rows") or []
+        if not rows:
+            out.append(("  no changes", "dim"))
+        for row, rstyle in rows:
+            out.append((U.clip_display(str(row), width), rstyle or "dim"))
+        return out
+
     if k in ("notice", "warn", "error"):
         style = {"notice": "dim", "warn": "warn", "error": "err"}[k]
         text = str(b.text or "")
@@ -687,6 +699,7 @@ COMMANDS = [
     ("/open", "open the last served URL"),
     ("/expand", "expand a tool card: /expand N"),
     ("/collapse", "collapse expanded tool output"),
+    ("/diff", "review uncommitted changes: /diff [path]"),
     ("/why", "why the last run finished that way"),
     ("/plan", "ask the lead for a plan"),
     ("/pause", "pause between turns"),
@@ -713,13 +726,13 @@ COMMANDS = [
     ("/export", "write the transcript to a file"),
 ]
 _ARG_COMMANDS = {"/new", "/kill", "/model", "/note", "/undo", "/resume",
-                 "/expand", "/collapse", "/export", "/ui"}
+                 "/expand", "/collapse", "/export", "/ui", "/diff"}
 
 COMMAND_GROUPS = [
     ("Start & resume", ["/new", "/resume", "/sessions", "/runs", "/init"]),
     ("While running", ["/plan", "/pause", "/unpause", "/compact",
                        "/tree", "/agents", "/jobs", "/kill", "/note"]),
-    ("Inspect", ["/why", "/cost", "/copy", "/open", "/export",
+    ("Inspect", ["/diff", "/why", "/cost", "/copy", "/open", "/export",
                  "/expand", "/collapse", "/undo"]),
     ("Setup", ["/model", "/models", "/doctor", "/ui", "/glyphs",
                "/keys", "/verbose"]),
@@ -741,6 +754,7 @@ commands
   /open [URL]        open the last served link with the system browser
   /expand [N]        show one tool card's full args/output (N from the end)
   /collapse [N]      collapse every expanded card (or just the Nth from the end)
+  /diff [path]       review uncommitted changes
   /why               why the last run finished the way it did
   /export [FILE]     write the whole transcript to FILE (plain text)
   /compact           force context compaction now
@@ -3018,6 +3032,17 @@ class App:
                 chain = C.get(self.cfg, f"roles.{role}.chain") or []
                 lines.append(f"{role:<10} " + " → ".join(str(m) for m in chain))
             self.add_notice("\n".join(lines))
+            return
+        if cmd == "/diff":
+            from . import diffview
+            text, note = diffview.git_diff(self.cwd, arg)
+            if note:
+                self.add_notice(note)
+                return
+            rows = diffview.numbered_rows(text, max(20, self.width - 2))
+            self.blocks.append(Block("diff", meta={
+                "path": arg, "rows": rows}))
+            self._bump()
             return
         if cmd in ("/cost", "/usage"):
             session = self.session_cost + (self.cost if self.running else 0)
