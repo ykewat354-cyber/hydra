@@ -1,5 +1,5 @@
                                                 
- █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.3.6               
+ █ █ █ █ █▀▄ █▀▄ ▄▀▄  HYDRA 1.4.0               
  █▀█ ▀█▀ █ █ ██▀ █▀█  nemotron-3-super          
  ▀ ▀  ▀  ▀▀  ▀ ▀ ▀ ▀  free plan · key ✓ loaded  
                                                 

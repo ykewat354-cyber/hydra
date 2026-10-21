@@ -6,6 +6,30 @@ All notable changes to HYDRA. Dates are local (Termux, Android).
 > hotfix (`62a5a5a`). WO3's final commit now carries the `v1.3.1` tag; the
 > hotfix is preserved as `v1.3.1-taskfocus`.
 
+## v1.4.0 — OmniRoute Lite & Code Precision (2026-10-21)
+
+- **Optional OpenAI-compatible transport.** `[api] protocol = "openai"` sends
+  standard streaming `/chat/completions` SSE to OpenRouter, Groq, a local
+  `llama.cpp` server, or another compatible endpoint. Ollama Cloud stays the
+  default; no SDK or third-party package was added. The client converts HYDRA
+  tool calls to OpenAI `tool_calls`/`tool_call_id` messages, assembles streamed
+  arguments, records usage, reuses keep-alive sockets, and classifies 401/402/
+  429/5xx errors. `OPENROUTER_API_KEY` / `OPENAI_API_KEY` are fallback key envs.
+- **Capability/model probing works without `/models`.** A 404/unsupported
+  discovery endpoint falls back to configured role chains; vision stays
+  fail-open instead of hiding `view_image`. Hosted `web_search` remains
+  Ollama-only; `web_fetch` keeps its raw HTTP fallback.
+- **Code review on a phone.** `hydra diff [path]` and TUI `/diff [path]` show a
+  bounded, numbered, coloured worktree diff. No git repository or a clean tree
+  produces one clean notice, never a traceback.
+- **Tolerant hunk editing.** `edit_file` now tries exact matching, trailing-
+  whitespace-insensitive matching, a uniform indentation shift, then
+  whitespace-normalized matching. A failed edit lists the three closest lines
+  with line numbers and remains atomic.
+- **Regression.** Fake OpenAI SSE server covers text deltas, split tool-call
+  arguments, usage, keep-alive, history conversion, error classes, model
+  discovery fallback, and a complete fake HYDRA run. Full suite green.
+
 ## v1.3.6 — read-time job liveness / WO4.1 (2026-10-21)
 
 - **No remembered job state.** `job_status`, the TUI `/jobs` view and the

@@ -12,7 +12,8 @@ Branch: `wo5`.
 - [x] `OpenAiClient` SSE/tool-call transport, keep-alive, usage, errors
 - [x] runtime/model/caps protocol selection + discovery fallback
 - [x] `tests/fake_openai.py` + W5-1 unit/end-to-end tests
-- [x] commit W5-1
+- [x] public `hydra --plain` black-box run against fake OpenAI
+- [x] commits W5-1
 
 ## M2 — W5-2 code precision
 - [x] `hydra diff` + TUI `/diff`
@@ -21,10 +22,11 @@ Branch: `wo5`.
 - [x] commit W5-2
 
 ## M3 — W5-3 release
-- [x] footprint: 4,735 tokens (< 5,000)
-- [ ] full suite re-run
-- [ ] eval seed re-run
-- [ ] black-box suite re-run
-- [ ] CHANGELOG/README + version 1.4.0
-- [ ] tag v1.4.0, merge main
-- [ ] report + secret scan
+- [x] full suite: 464 tests, 0 failures (287.865s)
+- [x] `hydra eval seed`: 10/10 passed, est $0.0139
+- [x] black-box suite: 17/17 passed
+- [x] footprint: 4,732 tokens (< 5,000)
+- [x] stdlib-only audit: 51 hydra files clean
+- [x] CHANGELOG/README + version 1.4.0
+- [x] tag v1.4.0, merge main (no force)
+- [x] report + secret scan (tree + history clean)

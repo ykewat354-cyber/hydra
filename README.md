@@ -1,16 +1,16 @@
 # 🐉 HYDRA
 
-**A Termux-native, fully autonomous multi-agent harness that runs entirely on Ollama Cloud models.**
-Many heads, one loop: a lead agent that spawns sub-agents, routes every job to the right model, and keeps going until the work is verifiably done.
+**A Termux-native, fully autonomous multi-agent harness with Ollama Cloud as its default provider.**
+Many heads, one loop: a lead agent that spawns sub-agents, routes every job to the right model, and keeps going until the work is verifiably done. An optional OpenAI-compatible transport can use OpenRouter, Groq, a local `llama.cpp` server, or another compatible endpoint.
 
 - 🖥️ **Termux only.** Android, aarch64, no root, Python stdlib only.
-- ☁️ **Ollama Cloud only.** One API key, hosted models, built around the free plan. No local inference, no other providers.
+- ☁️ **Ollama Cloud by default; OpenAI-compatible by choice.** One configured provider per run. No silent cross-provider failover, no third-party SDK.
 - 🤖 **Sub-agents everywhere.** Recursive, parallel, background. Each has its own context, role and model chain.
 - 🔀 **Multi-model calling.** Role-based routing, automatic failover, plus race / vote / cascade / mixture-of-agents / critic modes.
 - 🚫 **Zero gates.** No approval prompts, no "are you sure", no command allow/deny lists, no sandbox layer. The agent decides, the harness executes.
 - 💾 **Crash-proof.** Android will kill Termux. Every event is journaled and `hydra resume` picks up where it died.
 
-> **Status: implemented (v1.3.6, read-time job liveness patch).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 440+ stdlib tests (179+ subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. WO3 made reports trustworthy; WO3.1 closed six trust gaps. v1.3.3 makes resume human: named sessions, a `/resume` picker with last activity, a grouped `/commands` menu, and an opt-in boot/shell supervisor that continues a killed run in the background. v1.3.5 makes the closing card tell the truth about servers: finish-time probes, `served_alive`, one nudge, and no `/open` on a dead URL. v1.3.6 reads job liveness from `/proc` plus the port at the moment it is asked, so an exited job cannot be reported active. `hydra boot install` sets it up.
+> **Status: implemented (v1.4.0, provider agility + code precision).** All phases in [§17](#17-build-plan-for-the-implementing-ai) are built and tested on-device: 460+ stdlib tests (179+ subtests) plus a 10-task fake-server eval suite (`hydra eval seed`), zero credits. WO3 made reports trustworthy; WO3.1 closed six trust gaps. v1.3.3 makes resume human: named sessions, a `/resume` picker with last activity, a grouped `/commands` menu, and an opt-in boot/shell supervisor that continues a killed run in the background. v1.3.5 makes the closing card tell the truth about servers: finish-time probes, `served_alive`, one nudge, and no `/open` on a dead URL. v1.3.6 reads job liveness from `/proc` plus the port at the moment it is asked. v1.4.0 adds an opt-in OpenAI-compatible provider (`[api] protocol = "openai"`), keeps Ollama Cloud as the default, and adds `hydra diff` / TUI `/diff` plus tolerant hunk edits. `hydra boot install` sets up auto-resume.
 
 ### Install (one line)
 
@@ -51,10 +51,10 @@ and [`docs/REAL_API_NOTES.md`](docs/REAL_API_NOTES.md).
 ## 1. Hard constraints
 
 1. **Termux only.** Target: Android, aarch64, non-root, `$PREFIX=/data/data/com.termux/files/usr`. No Docker, no systemd, no `/tmp` (use `$TMPDIR`), no glibc assumptions. Write no code paths for other platforms.
-2. **Ollama Cloud only.** Every model call goes to `https://ollama.com` with one API key. No local Ollama, no OpenAI / Anthropic / Gemini / Groq / OpenRouter, no provider-abstraction layer.
+2. **One configured provider per run; Ollama Cloud is the default.** The native Ollama protocol stays the default and fallback. An opt-in OpenAI-compatible transport (`[api] protocol = "openai"`) may point at OpenRouter, Groq, a local `llama.cpp` server, or another compatible endpoint. There is no automatic cross-provider failover and no hidden expensive routing.
 3. **No gates.** No approval prompts, no confirmations, no command denylists, no "dangerous command" regexes, no dry-run mode. If you catch yourself writing `input("Proceed? [y/N]")`, delete it. The only human input path is *non-blocking steering* (§13).
 4. **Stdlib only.** Python ≥ 3.11 (`tomllib`, `threading`, `http.client`, `subprocess`, `pathlib`). No `ollama` SDK, no `requests`, no `pydantic`. Anything with a C/Rust extension is banned because it will not build on Termux. Use `pathlib.Path` for every path.
-5. **Direct HTTP.** Talk to the API with `http.client` / `urllib`. Streaming NDJSON is read line by line.
+5. **Direct HTTP.** Talk to the API with `http.client` / `urllib`. Ollama NDJSON and OpenAI-compatible SSE are parsed line by line; no SDK is used.
 6. **Journal everything.** Every state transition is appended to disk *before* it takes effect. Any `kill -9` must be resumable (§12).
 7. **One account, one key.** Ollama is one account per person. Do **not** build key pooling or rotation.
 8. **Reality beats this document.** Plans, prices, limits and model names (§2, §7) are volatile. Snapshot date: **2026-10-05**. They live in config or are probed at runtime, never hard-coded in logic.
@@ -631,6 +631,7 @@ hydra usage [RUN_ID]            token ledger + cost estimate
 hydra daemon                    watch ~/.hydra/queue/*.md and run each task
 hydra doctor                    environment checks
 hydra kill [RUN_ID]             stop a run (process groups included)
+hydra diff [PATH]               review uncommitted changes (git diff HEAD)
 hydra undo [RUN_ID] [--to N]    restore the workdir to a turn snapshot (§19.9)
 hydra init                      lead explores the repo and writes HYDRA.md (§19.1)
 hydra map [PATH]                print the repo map (§19.4)
@@ -674,8 +675,8 @@ calls collapse to one line, and the composer stays open while the run continues.
 Slash commands: `/help` · `/commands` (grouped, context-aware menu) ·
 `/resume` (named-session picker) · `/sessions` · `/runs` · `/clear` · `/copy` ·
 `/plan` · `/pause` · `/unpause` · `/tree` · `/kill aN` · `/model role=model` ·
-`/models` · `/cost` · `/note text` · `/undo` · `/doctor` · `/init` · `/keys` ·
-`/quit` · `/verbose`. Custom project commands (`~/.hydra/commands/*.md`) also
+`/models` · `/diff [path]` · `/cost` · `/note text` · `/undo` · `/doctor` ·
+`/init` · `/keys` · `/quit` · `/verbose`. Custom project commands (`~/.hydra/commands/*.md`) also
 work.
 
 The transcript has real scrollback: touch-scroll, mouse wheel/drag, `↑/↓` and
@@ -717,8 +718,9 @@ the next turn; `/tree` · `/kill aN` · `/model role=model` · `/pause` · `/res
 
 ```toml
 [api]
+protocol        = "ollama"             # ollama | openai (OpenAI-compatible)
 host            = "https://ollama.com"
-key_env         = "OLLAMA_API_KEY"
+key_env         = "OLLAMA_API_KEY"       # openai also falls back to OPENROUTER_API_KEY / OPENAI_API_KEY
 key_file        = "~/.hydra/key"        # used if the env var is unset
 plan            = "free"                # free | pro | max  → max_inflight 1 | 3 | 10
 max_inflight    = 0                     # 0 = derive from plan
@@ -908,7 +910,7 @@ Claims without evidence are unverified. Reply with JSON only:
 
 ## 18. Non-goals
 
-- Local model inference or any non-Ollama provider.
+- Unbounded multi-provider routing or silent failover to a paid provider. A local/OpenAI-compatible endpoint is allowed only as the explicitly configured `[api] protocol`.
 - Any platform other than Termux.
 - Approval flows, confirmation dialogs, sandboxes, command filters, "safe mode".
 - Multi-account key pooling or rotation.
@@ -1027,8 +1029,36 @@ eager   = false
 untrusted_tagging = true
 redact            = true
 untrusted_paths   = ["~/storage/downloads/**"]
-redact_env        = ["OLLAMA_API_KEY"]
+redact_env        = ["OLLAMA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"]
 ```
+
+### 14.1 Optional OpenAI-compatible provider
+
+Ollama Cloud remains the default. To opt in, point `protocol` at an
+OpenAI-compatible base URL (the URL must include any prefix, usually `/v1`):
+
+```toml
+[api]
+protocol = "openai"
+host     = "https://openrouter.ai/api/v1"   # or http://127.0.0.1:8080/v1
+key_env  = "OPENROUTER_API_KEY"
+```
+
+`OPENROUTER_API_KEY` and `OPENAI_API_KEY` are also tried automatically when
+`protocol = "openai"` and the configured `key_env` is unset. The same
+`~/.hydra/key` file works for a local server that does not need a key.
+
+HYDRA speaks the standard streaming `/chat/completions` SSE shape, converts
+HYDRA tool calls to OpenAI `tool_calls`/`tool_call_id` messages, and reads token
+usage from the final stream frame. `GET /models` is used for discovery when the
+endpoint supports it; if it returns 404, configured role chains are used for
+probing and vision stays fail-open. Hosted `web_search` is Ollama-only, so that
+tool is hidden on other providers; `web_fetch` keeps its raw HTTP fallback.
+
+This is deliberately **one provider per run**. Switching protocols does not
+change the budget cap or enable automatic paid failover. Check the provider's
+current prices, rate limits and data-retention policy before sending real work;
+model prices live in the same local ledger configuration as Ollama models.
 
 ---
 
