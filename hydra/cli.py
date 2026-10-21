@@ -31,7 +31,7 @@ from .client import CallCancelled
 COMMANDS = {"run", "resume", "ls", "sessions", "tail", "tree", "usage",
             "doctor", "kill", "models", "undo", "init", "map", "eval",
             "daemon", "boot", "schedule", "report", "update", "help",
-            "version", "ui-demo", "footprint", "diff"}
+            "version", "ui-demo", "footprint", "diff", "commit"}
 
 HELP = """HYDRA — autonomous multi-agent harness for Termux (Ollama Cloud default).
 
@@ -67,6 +67,7 @@ commands:
   schedule add|ls|rm    periodic jobs fired by the daemon
   map [PATH] [BUDGET]   repo map: tree + top-level symbols (cached)
   diff [path]           review uncommitted changes (git diff HEAD)
+  commit [MSG|-m MSG]   secret-guard, stage and commit (auto message from report)
   undo [RUN] [--to N]   restore the workdir from a shadow snapshot
   ui-demo [SCENE]       scripted UI scenes (home/running/done/palette/
                         stream/unicode/glyphs/all; --cost N previews the
@@ -101,6 +102,7 @@ REPL_HELP = """repl commands (all non-blocking, none is an approval):
   /kill aN         stop an agent (subtree included)
   /model [role=]m  pin a model first for a role (default lead)
   /models          role chains and registry status
+  /commit [msg]    secret-guard, stage and commit
   /cost            tokens + cost estimate so far
   /compact         force context compaction now
   /plan            tell the lead to plan (todos) before acting
@@ -281,6 +283,8 @@ def main(argv=None) -> int:
         return cmd_tree(rest[1:])
     if cmd == "diff":
         return cmd_diff(rest[1:])
+    if cmd == "commit":
+        return cmd_commit(cfg, rest[1:])
     if cmd == "report":
         from . import report as R
         return R.cli(cfg, rest[1:], json_out=o.json_out)
@@ -931,7 +935,8 @@ def _repl_cmd(rt, line, pending=None, notes=None) -> bool:
         for role in ("lead", "worker", "researcher", "critic", "summarizer",
                      "reviewer", "vision"):
             chain = C.get(rt.cfg, f"roles.{role}.chain") or []
-            print(f"{role:<10} " + " → ".join(str(m) for m in chain))
+            print(f"{role:<10} " + " → ".join(
+                C.model_label(m, rt.cfg) for m in chain))
         reg = getattr(rt, "registry", None)
         if reg is not None:
             try:
@@ -1340,6 +1345,19 @@ def cmd_diff(args) -> int:
         return 0
     print(text, end="" if text.endswith("\n") else "\n")
     return 0
+
+
+def cmd_commit(cfg, args) -> int:
+    """Secret-guard, stage and commit; print the short hash + stat card."""
+    from . import commit as Commit
+    try:
+        message = Commit.message_from_args(args)
+    except ValueError as exc:
+        print(f"hydra: {exc}")
+        return 2
+    code, text = Commit.run_commit(cfg, os.getcwd(), message or None)
+    print(text)
+    return code
 
 
 def cmd_ls() -> int:

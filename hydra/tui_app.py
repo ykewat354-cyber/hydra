@@ -25,6 +25,7 @@ import os
 import queue
 import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -700,6 +701,7 @@ COMMANDS = [
     ("/expand", "expand a tool card: /expand N"),
     ("/collapse", "collapse expanded tool output"),
     ("/diff", "review uncommitted changes: /diff [path]"),
+    ("/commit", "secret-guard, stage and commit: /commit [msg]"),
     ("/why", "why the last run finished that way"),
     ("/plan", "ask the lead for a plan"),
     ("/pause", "pause between turns"),
@@ -726,14 +728,14 @@ COMMANDS = [
     ("/export", "write the transcript to a file"),
 ]
 _ARG_COMMANDS = {"/new", "/kill", "/model", "/note", "/undo", "/resume",
-                 "/expand", "/collapse", "/export", "/ui", "/diff"}
+                 "/expand", "/collapse", "/export", "/ui", "/diff", "/commit"}
 
 COMMAND_GROUPS = [
     ("Start & resume", ["/new", "/resume", "/sessions", "/runs", "/init"]),
     ("While running", ["/plan", "/pause", "/unpause", "/compact",
                        "/tree", "/agents", "/jobs", "/kill", "/note"]),
-    ("Inspect", ["/diff", "/why", "/cost", "/copy", "/open", "/export",
-                 "/expand", "/collapse", "/undo"]),
+    ("Inspect", ["/diff", "/commit", "/why", "/cost", "/copy", "/open",
+                 "/export", "/expand", "/collapse", "/undo"]),
     ("Setup", ["/model", "/models", "/doctor", "/ui", "/glyphs",
                "/keys", "/verbose"]),
     ("Help & exit", ["/commands", "/help", "/clear", "/quit"]),
@@ -755,6 +757,7 @@ commands
   /expand [N]        show one tool card's full args/output (N from the end)
   /collapse [N]      collapse every expanded card (or just the Nth from the end)
   /diff [path]       review uncommitted changes
+  /commit [msg]      secret-guard, stage and commit (auto message from report)
   /why               why the last run finished the way it did
   /export [FILE]     write the whole transcript to FILE (plain text)
   /compact           force context compaction now
@@ -3030,7 +3033,8 @@ class App:
             for role in ("lead", "worker", "researcher", "critic", "summarizer",
                          "reviewer", "planner", "debugger", "tester", "scribe"):
                 chain = C.get(self.cfg, f"roles.{role}.chain") or []
-                lines.append(f"{role:<10} " + " → ".join(str(m) for m in chain))
+                lines.append(f"{role:<10} " + " → ".join(
+                    C.model_label(m, self.cfg) for m in chain))
             self.add_notice("\n".join(lines))
             return
         if cmd == "/diff":
@@ -3043,6 +3047,18 @@ class App:
             self.blocks.append(Block("diff", meta={
                 "path": arg, "rows": rows}))
             self._bump()
+            return
+        if cmd == "/commit":
+            from . import commit as Commit
+            try:
+                parts = shlex.split(arg) if arg else []
+                message = Commit.message_from_args(parts)
+            except ValueError as exc:
+                self.add_notice(f"/commit: {exc}", "error")
+                return
+            code, text = Commit.run_commit(self.cfg, self.cwd,
+                                            message or None)
+            self.add_notice(text, "notice" if code == 0 else "error")
             return
         if cmd in ("/cost", "/usage"):
             session = self.session_cost + (self.cost if self.running else 0)
