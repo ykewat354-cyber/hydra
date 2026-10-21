@@ -195,7 +195,16 @@ def normalize_call(tc) -> dict | None:
         args = {}
     if not isinstance(args, dict):
         args = {"value": args}
-    return {"function": {"name": str(name), "arguments": args}}
+    out = {"function": {"name": str(name), "arguments": args}}
+    # Keep the provider's call id: strict OpenAI-compatible servers require the
+    # following role:tool message to carry the same id.  Ollama calls may omit
+    # it; the OpenAI normalizer then generates a deterministic one.
+    cid = tc.get("id") or tc.get("tool_call_id")
+    if cid:
+        out["id"] = str(cid)
+    if tc.get("type"):
+        out["type"] = str(tc["type"])
+    return out
 
 
 def _balanced_objects(text: str, limit: int = 20):

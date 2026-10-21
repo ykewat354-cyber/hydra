@@ -322,10 +322,13 @@ class Swarm:
             if msgs and msgs[-1].get("role") == "assistant" and msgs[-1].get("tool_calls"):
                 for tc in msgs[-1]["tool_calls"]:
                     name = (tc.get("function") or {}).get("name") or "?"
-                    agent.append({"role": "tool", "tool_name": name,
-                                  "content": "INTERRUPTED: harness was killed while this "
-                                             "ran; effects unknown. Inspect state before "
-                                             "repeating."})
+                    msg = {"role": "tool", "tool_name": name,
+                           "content": "INTERRUPTED: harness was killed while this "
+                                      "ran; effects unknown. Inspect state before "
+                                      "repeating."}
+                    if tc.get("id"):
+                        msg["tool_call_id"] = str(tc["id"])
+                    agent.append(msg)
             with self.lock:
                 rt.agents[aid] = agent
                 self._done[aid] = threading.Event()

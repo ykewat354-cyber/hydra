@@ -164,9 +164,12 @@ def run_agent(agent, rt) -> dict:
                 if (last or {}).get("role") == "assistant" and (last or {}).get("tool_calls"):
                     for tc in last.get("tool_calls") or []:
                         name = (tc.get("function") or {}).get("name") or "?"
-                        agent.append({"role": "tool", "tool_name": name,
-                                      "content": "[interrupted by Ctrl-C: this tool call was "
-                                                 "cancelled; background effects unknown]"})
+                        msg = {"role": "tool", "tool_name": name,
+                               "content": "[interrupted by Ctrl-C: this tool call was "
+                                          "cancelled; background effects unknown]"}
+                        if tc.get("id"):
+                            msg["tool_call_id"] = str(tc["id"])
+                        agent.append(msg)
                 agent.turns = max(0, agent.turns - 1)
                 agent.steer("[harness] Ctrl-C: the in-flight work was cancelled. "
                             "Continue the task; re-check state if a command may have run.")

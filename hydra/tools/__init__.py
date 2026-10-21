@@ -302,9 +302,12 @@ class Executor:
                                            changed=changed,
                                            preview=content[:400])
                 ev_seq = (ev or {}).get("seq")
-            out.append({"role": "tool", "tool_name": name, "content": content,
-                        "ev": ev_seq, "turn": int(getattr(agent, "turns", 0) or 0),
-                        "changed": changed})
+            message = {"role": "tool", "tool_name": name, "content": content,
+                       "ev": ev_seq, "turn": int(getattr(agent, "turns", 0) or 0),
+                       "changed": changed}
+            if call.get("id"):
+                message["tool_call_id"] = str(call["id"])
+            out.append(message)
         return out
 
     def _timed(self, name: str, args: dict, agent):
