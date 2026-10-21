@@ -6,6 +6,23 @@ All notable changes to HYDRA. Dates are local (Termux, Android).
 > hotfix (`62a5a5a`). WO3's final commit now carries the `v1.3.1` tag; the
 > hotfix is preserved as `v1.3.1-taskfocus`.
 
+## v1.3.6 — read-time job liveness / WO4.1 (2026-10-21)
+
+- **No remembered job state.** `job_status`, the TUI `/jobs` view and the
+  verifier now ask the OS at read time: the job PID must exist in `/proc` and
+  a server port must accept a TCP connection. A dead PID is `exited` even if
+  an old snapshot said `running`; a live PID with a not-yet-bound port is
+  `starting`.
+- **Verifier gets a fresh snapshot.** The reviewer prompt includes the
+  finish-time `id: state pid port url` rows and labels earlier `job_status`
+  output as stale.
+- **Finish probe is scoped to the job.** A stopped server job cannot be
+  resurrected by another process listening on the same port; `served_alive`
+  stays false and the start URL remains a fallback.
+- **Regression.** Black-box: a short-lived server job exits, then finish
+  reports `served_alive=false` and `state=exited`; unit checks cover zombie
+  PIDs, closed ports, and a different HTTP server on the same port.
+
 ## v1.3.5 — server truth / WO4 (2026-10-21)
 
 - **Finish-time server probe.** The report now carries `served_url`,
