@@ -130,6 +130,43 @@ class Blackbox(unittest.TestCase):
         self.assertTrue([e for e in events if e.get("type") == "served_probe"
                          and int(e.get("status") or 0) == 200], events[-20:])
 
+    def test_q21_exited_server_job_is_never_reported_active(self):
+        # WO4.1 regression: a model may start a short-lived server and finish
+        # after it has already exited.  Liveness must be read from /proc + the
+        # port now, not from a remembered state or an earlier job_status line.
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        cmd = f"timeout 1 python -m http.server {port}"
+        script = [{
+            "content": "starting a short-lived server",
+            "tool_calls": [{"function": {"name": "bash", "arguments": {
+                "cmd": cmd, "background": True}}}],
+        }, {
+            "content": "waiting for it to exit",
+            "tool_calls": [{"function": {"name": "bash", "arguments": {
+                "cmd": "sleep 2"}}}],
+        }, {
+            "content": "done",
+            "tool_calls": [{"function": {"name": "finish", "arguments": {
+                "status": "done",
+                "summary": f"Served the site on http://127.0.0.1:{port}."}}}],
+        }, {
+            "content": "still done",
+            "tool_calls": [{"function": {"name": "finish", "arguments": {
+                "status": "done",
+                "summary": f"Served the site on http://127.0.0.1:{port}."}}}],
+        }]
+        _p, rep, _events = self.run_cli(
+            "Serve the site on one port, check it returns 200, then finish",
+            script)
+        self.assertFalse(rep.get("served_alive"), rep)
+        jobs = rep.get("jobs") or []
+        self.assertEqual(1, len(jobs), rep)
+        self.assertEqual("exited", jobs[0].get("state"), rep)
+        self.assertNotEqual("", jobs[0].get("pid"), rep)
+
     def test_a4_served_url_survives_stopping_the_job(self):
         # P1 regression: the agent may stop the server before finish.  HYDRA's
         # own bounded GET at job_start must still put served_url in the report.

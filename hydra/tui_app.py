@@ -36,6 +36,7 @@ from pathlib import Path
 
 from . import __version__
 from . import config as C
+from . import jobs as Jobs
 from . import journal as J
 from . import sessions as S
 from . import ui_format as U
@@ -2966,16 +2967,20 @@ class App:
             now = time.time()
             for jid, job in sorted(jobs.items()):
                 proc = job.get("proc")
-                try:
-                    code = proc.poll() if proc is not None else None
-                except Exception:
-                    code = None
-                state = "running" if code is None else f"exited({code})"
+                state = Jobs.job_state(job)
+                if state in ("running", "starting"):
+                    state_txt = state
+                else:
+                    try:
+                        code = proc.poll() if proc is not None else None
+                    except Exception:
+                        code = None
+                    state_txt = "exited" if code is None else f"exited({code})"
                 age = U.fmt_duration(now - float(job.get("started") or now))
                 cmd_txt = U.end_ellipsis(
                     " ".join(str(job.get("cmd") or "").split()),
                     max(8, self.width - 30))
-                lines.append(f"{jid:<4} {state:<10} {age:>6} {sep} {cmd_txt}")
+                lines.append(f"{jid:<4} {state_txt:<10} {age:>6} {sep} {cmd_txt}")
             self.add_notice("\n".join(lines))
             return
         if cmd == "/kill":

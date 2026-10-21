@@ -16,6 +16,7 @@ import urllib.request
 from pathlib import Path
 
 from . import Tool
+from .. import jobs as Jobs
 
 
 def _bash() -> str:
@@ -243,10 +244,22 @@ def _free_port_after(port: int):
 
 
 def _job_alive(job) -> bool:
+    # Duplicate-start guard: the process may be starting and not yet bound,
+    # but the OS PID still means this project already has a job.
+    return Jobs.job_process_alive(job)
+
+
+def _job_state_text(job) -> str:
+    state = Jobs.job_state(job)
+    if state == "running":
+        return "running"
+    if state == "starting":
+        return "starting"
     try:
-        return job.get("proc") is not None and job["proc"].poll() is None
+        rc = job["proc"].poll()
     except Exception:
-        return False
+        rc = None
+    return "exited" if rc is None else f"exited({rc})"
 
 
 def _probe_served(rt, jid: str, url: str, *, timeout: float = 5.0) -> bool:
@@ -387,10 +400,9 @@ def _tool_job_status(args, ctx) -> str:
         if not job:
             lines.append(f"{jid}: unknown")
             continue
-        rc = job["proc"].poll()
-        state = "running" if rc is None else f"exited({rc})"
+        state = _job_state_text(job)
         extra = f" port={job['port']} url={job.get('url')}" if job.get("port") else ""
-        lines.append(f"{jid}: {state} pid={job['proc'].pid}{extra} "
+        lines.append(f"{jid}: {state} pid={Jobs.job_pid(job)}{extra} "
                      f"cmd={job['cmd'][:100]}")
     return "\n".join(lines)
 
@@ -407,8 +419,7 @@ def _tool_job_output(args, ctx) -> str:
     except Exception as exc:
         return f"ERROR: cannot read log: {exc}"
     lines = text.splitlines()[-tail:]
-    rc = job["proc"].poll()
-    state = "running" if rc is None else f"exited({rc})"
+    state = _job_state_text(job)
     return f"job {jid} ({state}), last {len(lines)} lines:\n" + "\n".join(lines)
 
 

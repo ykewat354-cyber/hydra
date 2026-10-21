@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 
 from . import config as C
+from . import jobs as Jobs
 from .agent import load_prompt
 from .ui_format import issue_text, short as _short
 
@@ -648,13 +649,13 @@ def _server_jobs(agent) -> list:
         port = job.get("port")
         if not port:
             continue
-        try:
-            alive = job.get("proc") is not None and job["proc"].poll() is None
-        except Exception:
-            alive = False
+        # Q2.1: never trust a remembered "running" flag or a Popen handle.
+        # Re-read /proc and connect to the port at this instant.
+        state = Jobs.job_state(job)
         out.append({"id": str(jid), "port": int(port),
+                    "pid": Jobs.job_pid(job),
                     "url": job.get("url") or f"http://127.0.0.1:{port}/",
-                    "state": "running" if alive else "exited",
+                    "state": state,
                     "served_url": str(job.get("served_url") or "")})
     return out
 
@@ -662,12 +663,15 @@ def _server_jobs(agent) -> list:
 def _finish_server_state(agent) -> dict:
     """Probe this run's server at finish; keep the start probe as fallback.
 
-    ``served_alive`` is true only when HYDRA's own GET at finish returns 200.
-    A URL remembered from the job-start probe is still reported, but marked
-    with ``served_probe_at='start'`` and never presented as currently open.
+    ``served_alive`` is true only when this job's PID still exists, its port
+    accepts a connection, and HYDRA's own GET at finish returns 200.  A URL
+    remembered from the job-start probe is still reported, but marked with
+    ``served_probe_at='start'`` and never presented as currently open.
     """
     jobs = _server_jobs(agent)
     for job in reversed(jobs):
+        if job.get("state") != "running":
+            continue
         url = str(job.get("url") or job.get("served_url") or "")
         if url and _live_get(url) == 200:
             return {"served_url": url, "served_alive": True,
@@ -908,6 +912,10 @@ def check(rt, agent) -> dict:
     else:
         files_line = "\n".join(rep.get("files_changed") or ["(none)"])
     det = "pass" if audit.get("claims") else "(no concrete claims)"
+    jobs_line = "\n".join(
+        f"{j.get('id')}: {j.get('state')} pid={j.get('pid')} "
+        f"port={j.get('port')} url={j.get('url')}"
+        for j in (audit.get("jobs") or []))
     claim = (
         f"TASK:\n{agent.task[:1500]}\n\n"
         f"FINAL SUMMARY:\n{str(rep.get('summary') or '')[:1500]}\n\n"
@@ -920,6 +928,8 @@ def check(rt, agent) -> dict:
                              for c in (audit.get("claims") or [])][:8]) +
         " · evidence_events=" + str(rep.get("evidence") or []) +
         " · served_url=" + str(rep.get("served_url") or "") +
+        "\n\nJOBS AT FINISH (fresh OS PID+/proc and port connect; earlier "
+        "job_status outputs are stale):\n" + (jobs_line or "(none)") +
         "\n\nARTIFACT CONTENTS (read from disk; a summary is not a deliverable):\n" +
         ("\n\n".join(artifact_evidence) or "(none readable)") +
         "\n\nEVIDENCE (recent tool calls with outputs, oldest first):\n" +
